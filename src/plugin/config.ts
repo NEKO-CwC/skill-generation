@@ -64,6 +64,20 @@ export async function loadConfig(configPath: string): Promise<SkillEvolutionConf
 }
 
 /**
+ * Adapts raw config from OpenClaw's plugins.entries.<id>.config to SkillEvolutionConfig.
+ * Applies defaults and validates.
+ */
+export function fromOpenClawPluginConfig(raw: Record<string, unknown>): SkillEvolutionConfig {
+  const defaults = getDefaultConfig();
+  const source = (raw && typeof raw === 'object' && 'skillEvolution' in raw)
+    ? (raw as unknown as SkillEvolutionConfigFile).skillEvolution
+    : raw as unknown as Partial<SkillEvolutionConfig>;
+  const merged = deepMerge(defaults, source as SkillEvolutionConfig);
+  validateConfig(merged);
+  return merged;
+}
+
+/**
  * Validates the full plugin configuration schema.
  */
 export function validateConfig(config: SkillEvolutionConfig): void {

@@ -150,3 +150,77 @@ export interface Logger {
   warn(message: string, context?: UnknownRecord): void;
   error(message: string, context?: UnknownRecord): void;
 }
+
+// ── OpenClaw Plugin API Types ──────────────────────────────────────
+
+/** The API object passed to the plugin's register function by OpenClaw. */
+export interface OpenClawPluginAPI {
+  on(hook: 'before_prompt_build', handler: BeforePromptBuildHandler, opts?: HookOptions): void;
+  on(hook: 'after_tool_call', handler: AfterToolCallHandler, opts?: HookOptions): void;
+  on(hook: 'message_received', handler: MessageReceivedHandler, opts?: HookOptions): void;
+  on(hook: 'agent_end', handler: AgentEndHandler, opts?: HookOptions): void;
+  getConfig(): Record<string, unknown>;
+}
+
+export interface HookOptions {
+  priority?: number;
+}
+
+export interface PluginHookAgentContext {
+  sessionId: string;
+  agentId?: string;
+  [key: string]: unknown;
+}
+
+export interface BeforePromptBuildEvent {
+  prompt: string;
+  messages: unknown[];
+  modelId?: string;
+  provider?: string;
+  [key: string]: unknown;
+}
+
+export interface BeforePromptBuildResult {
+  prependSystemContext?: string;
+  appendSystemContext?: string;
+  systemPrompt?: string;
+  prependContext?: string;
+}
+
+export type BeforePromptBuildHandler = (
+  event: BeforePromptBuildEvent,
+  ctx: PluginHookAgentContext
+) => BeforePromptBuildResult | undefined | Promise<BeforePromptBuildResult | undefined>;
+
+export interface AfterToolCallEvent {
+  tool: string;
+  result: string;
+  isError?: boolean;
+  [key: string]: unknown;
+}
+
+export type AfterToolCallHandler = (
+  event: AfterToolCallEvent,
+  ctx: PluginHookAgentContext
+) => void | Promise<void>;
+
+export interface MessageReceivedEvent {
+  message: string;
+  role?: string;
+  [key: string]: unknown;
+}
+
+export type MessageReceivedHandler = (
+  event: MessageReceivedEvent,
+  ctx: PluginHookAgentContext
+) => void | Promise<void>;
+
+export interface AgentEndEvent {
+  summary?: string;
+  [key: string]: unknown;
+}
+
+export type AgentEndHandler = (
+  event: AgentEndEvent,
+  ctx: PluginHookAgentContext
+) => void | Promise<void>;
