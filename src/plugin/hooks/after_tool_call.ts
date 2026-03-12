@@ -1,0 +1,54 @@
+/**
+ * Hook invoked after tool execution for feedback capture.
+ */
+
+import type { FeedbackEvent, OverlayEntry } from '../../shared/types.js';
+import type { SkillEvolutionPlugin } from '../index.js';
+
+/**
+ * Handles post-tool-call feedback collection.
+ */
+export async function after_tool_call(
+  plugin: SkillEvolutionPlugin,
+  sessionId: string,
+  toolName: string,
+  output: string,
+  isError: boolean
+): Promise<void> {
+  plugin.ensureSessionStarted(sessionId);
+  const skillKey = plugin.getSessionSkillKey(sessionId);
+  const eventType = plugin.feedbackClassifier.classify(output, isError);
+
+  if (eventType === null) {
+    return;
+  }
+
+  const priorEvents = await plugin.feedbackCollector.getSessionFeedback(sessionId);
+  const event: FeedbackEvent = {
+    sessionId,
+    skillKey,
+    timestamp: Date.now(),
+    eventType,
+    severity: plugin.feedbackClassifier.assessSeverity(priorEvents),
+    toolName,
+    messageExcerpt: output.slice(0, 280)
+  };
+  await plugin.feedbackCollector.collect(event);
+
+  if (!isError || !plugin.config.triggers.onToolError || !plugin.config.sessionOverlay.enabled) {
+    return;
+  }
+
+  const overlayEntry: OverlayEntry = {
+    sessionId,
+    skillKey,
+    content: `Tool error observed for ${toolName}. Avoid prior failure mode.\nError excerpt: ${output.slice(0, 400)}`,
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+    reasoning: 'Generated from onToolError trigger after failed tool call.'
+  };
+
+  await plugin.overlayStore.create(overlayEntry);
+}
+
+export default after_tool_call;
