@@ -1,123 +1,85 @@
 # OpenClaw Skill Evolution Plugin
 
-## What it does
-The Skill Evolution plugin captures tool errors and user corrections during OpenClaw sessions. It creates temporary session-local overlays and runs deterministic end-of-session reviews. After the review, it generates patches and safely merges improvements back into your skills with rollback protection.
+让 OpenClaw 的 skills 根据真实使用反馈持续演进的插件。
 
-## What this is NOT
-*   **Not a skill package.** Do not install this via `openclaw skills`. It is a plugin that enhances how skills behave.
-*   **Not a set of skills.** It does not include any `SKILL.md` files. Instead, it evolves your existing skills.
-*   **No LLMs for review.** This version uses deterministic rules for post-session reviews rather than LLM calls.
+它会在 session 中收集工具错误、用户纠正和正向反馈，生成**仅当前 session 生效**的临时 overlay；在 session 结束后再进行复盘，产出 patch，并按配置选择**人工 merge**或**自动 merge**。同时为每个 skill 保留最多 **5 个回滚版本**。
 
-## Prerequisites
-*   OpenClaw (latest version recommended)
-*   Node.js 22+
-*   `allowPromptInjection: true` in your plugin configuration. This is required for overlay injection to work.
+## 这是什么
 
-## Install
+这是一个 **OpenClaw plugin**，不是普通 skill。
+
+- 用于让 skill 的 `SKILL.md` / 使用说明逐步适配真实工作流
+- 支持 session-local overlay，不会直接污染共享 skill 文件
+- 支持 session 结束后的 patch 生成、merge 和 rollback
+- 支持全局人工审核开关
+
+## 这不是什么
+
+请不要把它当成：
+
+- `skills/` 目录下的 skill 包
+- 依赖 `SKILL.md` 被发现的技能
+- 复制进 `~/.openclaw/skills/` 就能工作的项目
+
+它应当通过 **OpenClaw plugins** 机制安装和启用。
+
+## 快速开始
+
+### Agent 安装
+
+```
+Install and configure the skill-generation plugin of openclaw by following the instructions here:
+https://raw.githubusercontent.com/NEKO-CwC/skill-generation/refs/heads/master/docs/install.md
+```
+
+### Human 安装
+
+完整安装与配置说明请看：
+
+- [安装指南](./docs/install.md)
+- [配置说明](./docs/config.md)
+- [故障排查](./docs/troubleshooting.md)
+
+最简流程：
+
 ```bash
-# Clone the plugin
-git clone <repo-url> openclaw-skill-evolution
-cd openclaw-skill-evolution
+git clone https://github.com/NEKO-CwC/skill-generation.git
+cd skill-generation
 npm install
+npm run build
+npm run test
 
-# Register with OpenClaw
 openclaw plugins install -l .
+openclaw plugins enable skill-evolution
+````
+
+然后把配置写到 OpenClaw 主配置里的：
+
+```jsonc
+plugins.entries.skill-evolution.config
 ```
 
-## Configure
-Add this JSON5 block to your `~/.openclaw/openclaw.json` file:
-
-```json5
-{
-  "plugins": {
-    "entries": {
-      "skill-evolution": {
-        "enabled": true,
-        "hooks": {
-          "allowPromptInjection": true  // REQUIRED for overlay injection
-        },
-        "config": {
-          "enabled": true,
-          "merge": {
-            "requireHumanMerge": true,  // set false for auto-merge
-            "maxRollbackVersions": 5
-          },
-          "sessionOverlay": {
-            "enabled": true,
-            "storageDir": ".skill-overlays",
-            "injectMode": "system-context",
-            "clearOnSessionEnd": true
-          },
-          "triggers": {
-            "onToolError": true,
-            "onUserCorrection": true,
-            "onSessionEndReview": true,
-            "onPositiveFeedback": true
-          },
-          "review": {
-            "minEvidenceCount": 2,
-            "allowAutoMergeOnLowRiskOnly": false
-          }
-        }
-      }
-    }
-  }
-}
-```
-
-## Verify installation
-Run these commands to confirm the plugin is active:
+最后重启 OpenClaw，并用下面命令验证：
 
 ```bash
-openclaw plugins list          # Should show skill-evolution
-openclaw plugins info skill-evolution  # Shows config schema
-openclaw plugins doctor        # Health check
+openclaw plugins list
+openclaw plugins info skill-evolution
+openclaw plugins doctor
 ```
 
-## How it works
-1.  **During session:** The plugin captures tool failures and user corrections. It then creates session-local overlays to adjust behavior immediately.
-2.  **Before each prompt:** Overlay hints are injected into the system context via the `before_prompt_build` hook.
-3.  **At session end:** A deterministic review evaluates the accumulated feedback.
-4.  **Patch generation:** If the review recommends changes, the plugin generates a text patch.
-5.  **Merge:** Depending on your `requireHumanMerge` setting, the plugin either auto-merges the patch with a rollback backup or queues it for human review.
+## 注意事项
 
-## Configuration reference
+* 这是 **plugin，不是 skill**
+* 不要放进 `skills/`
+* 不要用 `openclaw skills list` 验证安装
+* 如果 overlay 没有注入 prompt，优先检查：
+  `plugins.entries.skill-evolution.hooks.allowPromptInjection`
 
-| Key | Type | Default | Description |
-| :--- | :--- | :--- | :--- |
-| `enabled` | boolean | `true` | Enables or disables the plugin. |
-| `merge.requireHumanMerge` | boolean | `true` | If true, patches are queued for manual review. If false, patches are merged automatically. |
-| `merge.maxRollbackVersions` | number | `5` | Maximum number of backups to keep per skill. |
-| `sessionOverlay.enabled` | boolean | `true` | Enables session-local temporary skill modifications. |
-| `sessionOverlay.storageDir` | string | `.skill-overlays` | Directory for temporary overlay storage. |
-| `sessionOverlay.injectMode` | string | `system-context` | Where to inject overlays in the prompt. |
-| `sessionOverlay.clearOnSessionEnd` | boolean | `true` | Deletes temporary overlays when the session finishes. |
-| `triggers.onToolError` | boolean | `true` | Collect feedback when a tool returns an error. |
-| `triggers.onUserCorrection` | boolean | `true` | Collect feedback when a user corrects the agent. |
-| `triggers.onSessionEndReview` | boolean | `true` | Run the review process at the end of a session. |
-| `triggers.onPositiveFeedback` | boolean | `true` | Track positive signals to validate skill performance. |
-| `review.minEvidenceCount` | number | `2` | Minimum number of feedback events required to recommend a change. |
-| `review.allowAutoMergeOnLowRiskOnly` | boolean | `false` | Reserved for future risk-based filtering. |
+## 核心能力
 
-## Common issues / FAQ
+* 收集工具失败、用户纠正、正向反馈
+* 生成 session-local overlay
+* 在 session 结束时执行 deterministic review
+* 生成 patch，并支持 manual / auto merge
+* 保留最多 5 个 skill 历史版本用于回滚
 
-**"Plugin seems to have no effect"**
-Check that `allowPromptInjection: true` is set in your config. If this is false, OpenClaw blocks overlay injection. The plugin will still collect feedback, but you won't see the overlays in your prompts.
-
-**"Patches are queued but not applied"**
-You likely have `requireHumanMerge: true` enabled. Check the `.skill-patches/` directory for pending patches that need manual application.
-
-**"No review happens at session end"**
-Ensure `triggers.onSessionEndReview` is true. Also check `review.minEvidenceCount`. A review only triggers if you have at least that many feedback events.
-
-**"Overlays from previous sessions persist"**
-Verify that `sessionOverlay.clearOnSessionEnd` is set to true.
-
-## Development
-For those looking to contribute, the project uses TypeScript in strict mode. You can find detailed architecture information in the `docs/` folder.
-
-```bash
-npm run build   # Build the project
-npm run test    # Run the 88 tests via vitest
-npm run lint    # Run linting checks
-```
