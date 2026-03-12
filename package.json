@@ -1,5 +1,5 @@
 {
-  "name": "openclaw-skill-evolution-plugin",
+  "name": "skill-evolution",
   "version": "0.1.0",
   "private": true,
   "type": "module",
