@@ -1,270 +1,366 @@
-import { ReviewFailedError } from '../shared/errors.js';
+import { join } from 'node:path';
+import type { ReviewResult, SessionSummary, ResolvedPaths, SkillEvolutionConfig, RefreshableReviewRunner, LlmResolver, ResolvedProvider } from '../shared/types.js';
 import ConsoleLogger from '../shared/logger.js';
-import type {
-  EvolutionTarget,
-  LlmClient,
-  ReviewResult,
-  ReviewRunner,
-  SessionSummary,
-  SkillEvolutionConfig
-} from '../shared/types.js';
-import { getDefaultConfig } from '../plugin/config.js';
 
-const DEFAULT_CONFIG: SkillEvolutionConfig = getDefaultConfig();
-
-const SYSTEM_PROMPT = `You are a skill document reviewer for an AI agent framework. Your task is to review evidence from a coding session and produce an updated skill document.
-
-Rules:
-- Only output the final target document content (no patch reports, no metadata headers)
-- If evidence is insufficient, respond with exactly: NO_MODIFICATION
-- Make only minimal changes supported by the evidence
-- Preserve the original document's structure and tone
-- For builtin/global targets, write tool-specific or general behavioral guidance
-- Output must be valid markdown`;
-
-export class LlmReviewRunner implements ReviewRunner {
-  private readonly config: SkillEvolutionConfig;
-  private readonly llmClient: LlmClient | null;
-  private readonly deterministicFallback: ReviewRunner;
-  private readonly logger = new ConsoleLogger('llm_review_runner');
-
-  public constructor(
-    config: SkillEvolutionConfig = DEFAULT_CONFIG,
-    llmClient: LlmClient | null = null,
-    deterministicFallback?: ReviewRunner
-  ) {
-    this.config = config;
-    this.llmClient = llmClient;
-    this.deterministicFallback = deterministicFallback ?? new DeterministicReviewRunner(config);
+const DEFAULT_CONFIG: SkillEvolutionConfig = {
+  enabled: true,
+  merge: {
+    requireHumanMerge: true,
+    maxRollbackVersions: 5
+  },
+  sessionOverlay: {
+    enabled: true,
+    storageDir: '.skill-overlays',
+    injectMode: 'system-context',
+    clearOnSessionEnd: true
+  },
+  triggers: {
+    onToolError: true,
+    onUserCorrection: true,
+    onSessionEndReview: true,
+    onPositiveFeedback: true
+  },
+  llm: {
+    inheritPrimaryConfig: true,
+    modelOverride: null,
+    thinkingOverride: null
+  },
+  review: {
+    minEvidenceCount: 2,
+    allowAutoMergeOnLowRiskOnly: false
   }
+};
 
-  public async runReview(summary: SessionSummary): Promise<ReviewResult> {
-    if (!this.llmClient) {
-      this.logger.info('No LLM client available, using deterministic fallback', {
-        sessionId: summary.sessionId
-      });
-      return this.deterministicFallback.runReview(summary);
-    }
+/**
+ * Builds a prompt for LLM-based skill modification review.
+ */
+function buildReviewPrompt(summary: SessionSummary, skillContent: string): string {
+  const errorEvents = summary.events.filter(e => e.eventType === 'tool_error');
+  const correctionEvents = summary.events.filter(e => e.eventType === 'user_correction');
+  const positiveEvents = summary.events.filter(e => e.eventType === 'positive_feedback');
+  const overlays = summary.overlays;
 
-    try {
-      return await this.runLlmReview(summary);
-    } catch (error: unknown) {
-      const message = error instanceof Error ? error.message : String(error);
-      this.logger.warn('LLM review failed, falling back to deterministic', {
-        sessionId: summary.sessionId,
-        error: message
-      });
-      return this.deterministicFallback.runReview(summary);
-    }
-  }
+  let prompt = `You are an expert in refining AI assistant skill documentation. Below is a summary of a recent session where the skill had issues.
 
-  private async runLlmReview(summary: SessionSummary): Promise<ReviewResult> {
-    const prompt = this.buildPrompt(summary);
-    const response = await this.llmClient!.complete(prompt, SYSTEM_PROMPT);
+# Session Summary
+- Session ID: ${summary.sessionId}
+- Skill: ${summary.skillKey}
+- Duration: ${summary.durationMs}ms
+- Total Errors: ${summary.totalErrors}
 
-    const isNoModification = response.trim() === 'NO_MODIFICATION';
-    const overlayCount = summary.overlays.length;
-    const correctionCount = summary.events.filter((e) => e.eventType === 'user_correction').length;
-    const riskLevel = this.getRiskLevel(summary.totalErrors, correctionCount);
-    const mergeMode = this.config.merge.requireHumanMerge ? 'manual' : 'auto';
-    const patchId = `patch_${Date.now()}`;
+# Current Skill Documentation
+\`\`\`markdown
+${skillContent || '(empty or missing)'}
+\`\`\`
 
-    const primaryTarget = this.getPrimaryTarget(summary);
-    const evidenceSummary = this.buildEvidenceSummary(summary);
-    const proposedDiff = summary.overlays.map((entry) => entry.content).join('\n\n');
+# Problem Signals
 
-    const result: ReviewResult = {
-      isModificationRecommended: !isNoModification,
-      justification: isNoModification
-        ? 'LLM review determined insufficient evidence for modification.'
-        : `LLM review recommended changes based on ${summary.totalErrors} errors and ${correctionCount} corrections.`,
-      proposedDiff,
-      proposedDocument: isNoModification ? undefined : response.trim(),
-      changeSummary: isNoModification ? undefined : `LLM-generated document update for ${primaryTarget.kind}:${primaryTarget.key}`,
-      evidenceSummary,
-      target: primaryTarget,
-      riskLevel,
-      reviewSource: 'llm',
-      metadata: {
-        skillKey: summary.skillKey,
-        patchId,
-        baseVersion: 'latest',
-        sourceSessionId: summary.sessionId,
-        mergeMode,
-        riskLevel,
-        rollbackChainDepth: 0
-      }
-    };
+## Tool Errors (${errorEvents.length})
+${errorEvents.map((e, i) => `### ${i + 1}. Tool: ${e.toolName || 'unknown'}
+- Severity: ${e.severity}
+- Message: ${e.messageExcerpt || 'no details'}`).join('\n') || 'None'}
 
-    this.logger.info('LLM review completed', {
-      sessionId: summary.sessionId,
-      recommended: result.isModificationRecommended,
-      riskLevel,
-      patchId,
-      target: `${primaryTarget.kind}:${primaryTarget.key}`
-    });
+## User Corrections (${correctionEvents.length})
+${correctionEvents.map((e, i) => `### ${i + 1}. Message excerpt:
+${e.messageExcerpt || 'empty'}`).join('\n') || 'None'}
 
-    return result;
-  }
+## Overlays Generated (${overlays.length})
+${overlays.map((o, i) => `### ${i + 1}. ${o.reasoning}
+\`\`\`
+${o.content}
+\`\`\``).join('\n') || 'None'}
 
-  private buildPrompt(summary: SessionSummary): string {
-    const lines: string[] = [];
+## Positive Feedback (${positiveEvents.length})
+${positiveEvents.map((e, i) => `### ${i + 1}. ${e.messageExcerpt || 'none'}`).join('\n') || 'None'}
 
-    const primaryTarget = this.getPrimaryTarget(summary);
-    lines.push(`## Target: ${primaryTarget.kind}:${primaryTarget.key}`);
-    lines.push('');
+# Task
+Based on the signals above, propose a patch to improve the skill's documentation (SKILL.md). The patch should:
 
-    const originalDoc = summary.overlays.length > 0
-      ? summary.overlays.map((o) => o.content).join('\n\n')
-      : '(No existing document content)';
-    lines.push('## Current Document Content');
-    lines.push(originalDoc);
-    lines.push('');
+1. Address common failure modes by clarifying usage, required parameters, or error handling
+2. Incorporate user corrections to better match real needs
+3. Keep the existing structure but improve clarity and robustness
+4. Be formatted as a unified diff (subject to refinement by the patch generator)
 
-    lines.push('## Session Evidence');
-    const errors = summary.events.filter((e) => e.eventType === 'tool_error');
-    if (errors.length > 0) {
-      lines.push(`### Tool Errors (${errors.length})`);
-      for (const err of errors.slice(0, 10)) {
-        const normalized = err.normalizedError;
-        if (normalized) {
-          lines.push(`- **${normalized.toolName}**: ${normalized.message} (source: ${normalized.source})`);
-        } else {
-          lines.push(`- **${err.toolName ?? 'unknown'}**: ${err.messageExcerpt ?? 'no details'}`);
-        }
-      }
-      lines.push('');
-    }
+Return your suggested changes in markdown with clear "## Proposed Changes" and "## Original Content" sections.`;
 
-    const corrections = summary.events.filter((e) => e.eventType === 'user_correction');
-    if (corrections.length > 0) {
-      lines.push(`### User Corrections (${corrections.length})`);
-      for (const corr of corrections.slice(0, 10)) {
-        lines.push(`- ${corr.messageExcerpt ?? 'no details'}`);
-      }
-      lines.push('');
-    }
-
-    const positives = summary.events.filter((e) => e.eventType === 'positive_feedback');
-    if (positives.length > 0) {
-      lines.push(`### Positive Feedback (${positives.length})`);
-      for (const pos of positives.slice(0, 5)) {
-        lines.push(`- ${pos.messageExcerpt ?? 'no details'}`);
-      }
-      lines.push('');
-    }
-
-    if (summary.overlays.length > 0) {
-      lines.push(`### Session Overlays (${summary.overlays.length})`);
-      for (const overlay of summary.overlays) {
-        lines.push(`- ${overlay.reasoning}: ${overlay.content.slice(0, 200)}`);
-      }
-      lines.push('');
-    }
-
-    lines.push('## Instructions');
-    lines.push('Based on the evidence above, produce an updated version of the target document.');
-    lines.push('If the evidence is insufficient to justify changes, respond with exactly: NO_MODIFICATION');
-
-    return lines.join('\n');
-  }
-
-  private buildEvidenceSummary(summary: SessionSummary): string {
-    const errors = summary.events.filter((e) => e.eventType === 'tool_error').length;
-    const corrections = summary.events.filter((e) => e.eventType === 'user_correction').length;
-    const positives = summary.events.filter((e) => e.eventType === 'positive_feedback').length;
-    return `${errors} errors, ${corrections} corrections, ${positives} positive signals, ${summary.overlays.length} overlays over ${Math.round(summary.durationMs / 1000)}s`;
-  }
-
-  private getPrimaryTarget(summary: SessionSummary): EvolutionTarget {
-    if (summary.targets && summary.targets.length > 0) {
-      return summary.targets[0];
-    }
-
-    const eventWithTarget = summary.events.find((e) => e.target);
-    if (eventWithTarget?.target) {
-      return eventWithTarget.target;
-    }
-
-    return {
-      kind: 'global',
-      key: 'default',
-      storageKey: 'global-default',
-      mergeMode: 'global-doc'
-    };
-  }
-
-  private getRiskLevel(totalErrors: number, correctionCount: number): 'low' | 'medium' | 'high' {
-    const combined = totalErrors + correctionCount;
-    if (combined <= 1) return 'low';
-    if (combined <= 3) return 'medium';
-    return 'high';
-  }
+  return prompt;
 }
 
-export class DeterministicReviewRunner implements ReviewRunner {
+/**
+ * LLM-based review runner that generates skill modification suggestions via AI.
+ */
+export class LLMReviewRunner implements RefreshableReviewRunner {
   private readonly config: SkillEvolutionConfig;
-  private readonly logger = new ConsoleLogger('deterministic_review_runner');
+  private readonly logger = new ConsoleLogger('review_runner.llm');
+  private readonly skillContentCache: Map<string, string> = new Map();
+  public paths: ResolvedPaths | null;
+  private llmResolver?: LlmResolver | null;
 
-  public constructor(config: SkillEvolutionConfig = DEFAULT_CONFIG) {
+  public constructor(config: SkillEvolutionConfig = DEFAULT_CONFIG, paths: ResolvedPaths | null = null) {
     this.config = config;
+    this.paths = paths;
   }
 
+  /**
+   * Refreshes runtime context after workspace binding changes.
+   * Clears stale caches so subsequent reviews use the new workspace paths.
+   */
+  public refreshRuntimeContext(ctx: {
+    paths: ResolvedPaths;
+    llmRuntimeResolver?: LlmResolver | null;
+  }): void {
+    this.logger.info('Refreshing runtime context', {
+      oldWorkspaceDir: this.paths?.workspaceDir,
+      newWorkspaceDir: ctx.paths.workspaceDir,
+      hasResolver: !!ctx.llmRuntimeResolver,
+      cacheSize: this.skillContentCache.size
+    });
+    this.paths = ctx.paths;
+    this.skillContentCache.clear();
+    this.llmResolver = ctx.llmRuntimeResolver ?? null;
+  }
+
+  /**
+   * Executes LLM-powered review.
+   */
   public async runReview(summary: SessionSummary): Promise<ReviewResult> {
+    const { sessionId, skillKey, totalErrors, events, overlays } = summary;
+    const correctionCount = events.filter(e => e.eventType === 'user_correction').length;
+    const positiveCount = events.filter(e => e.eventType === 'positive_feedback').length;
+
+    // Determine if we should recommend modification
+    const shouldRecommend = totalErrors > 0 || correctionCount > 0 || overlays.length > 0;
+    const riskLevel = this.getRiskLevel(totalErrors + correctionCount);
+
+    if (!shouldRecommend) {
+      return {
+        isModificationRecommended: false,
+        justification: `No significant issues detected (errors: ${totalErrors}, corrections: ${correctionCount}, overlays: ${overlays.length}).`,
+        proposedDiff: '',
+        riskLevel,
+        metadata: {
+          skillKey,
+          patchId: `patch_${Date.now()}`,
+          baseVersion: 'latest',
+          sourceSessionId: sessionId,
+          mergeMode: this.config.merge.requireHumanMerge ? 'manual' : 'auto',
+          riskLevel,
+          rollbackChainDepth: 0
+        }
+      };
+    }
+
     try {
-      const overlayCount = summary.overlays.length;
-      const correctionCount = summary.events.filter((e) => e.eventType === 'user_correction').length;
-      const positiveCount = summary.events.filter((e) => e.eventType === 'positive_feedback').length;
-      const shouldRecommend = summary.totalErrors > 0 || correctionCount > 0 || overlayCount > 0;
+      // Read current skill content
+      const skillContent = await this.getSkillContent(skillKey);
 
-      const riskLevel = this.getRiskLevel(summary.totalErrors, correctionCount);
-      const proposedDiff = summary.overlays.map((entry) => entry.content).join('\n\n');
-      const mergeMode = this.config.merge.requireHumanMerge ? 'manual' : 'auto';
-      const patchId = `patch_${Date.now()}`;
+      // Build prompt and call LLM
+      const prompt = buildReviewPrompt(summary, skillContent);
+      const llmOutput = await this.callLLM(prompt);
 
-      const primaryTarget = summary.targets?.[0] ?? summary.events.find((e) => e.target)?.target;
-      const evidenceSummary = `${summary.totalErrors} errors, ${correctionCount} corrections, ${positiveCount} positive signals, ${overlayCount} overlays`;
+      // Extract the diff from LLM response
+      const proposedDiff = this.extractDiff(llmOutput);
 
       const result: ReviewResult = {
-        isModificationRecommended: shouldRecommend,
-        justification: `Session had ${summary.totalErrors} errors, ${correctionCount} corrections, ${positiveCount} positive signals, and ${overlayCount} overlays.`,
+        isModificationRecommended: true,
+        justification: `LLM analysis complete: ${totalErrors} errors, ${correctionCount} corrections, ${positiveCount} positive signals, ${overlays.length} overlays.`,
         proposedDiff,
-        evidenceSummary,
-        target: primaryTarget,
         riskLevel,
-        reviewSource: 'deterministic',
         metadata: {
-          skillKey: summary.skillKey,
-          patchId,
+          skillKey,
+          patchId: `patch_${Date.now()}`,
           baseVersion: 'latest',
-          sourceSessionId: summary.sessionId,
-          mergeMode,
+          sourceSessionId: sessionId,
+          mergeMode: this.config.merge.requireHumanMerge ? 'manual' : 'auto',
           riskLevel,
           rollbackChainDepth: 0
         }
       };
 
-      this.logger.info('Review completed', {
-        sessionId: summary.sessionId,
-        skillKey: summary.skillKey,
-        recommended: result.isModificationRecommended,
-        riskLevel: result.riskLevel,
-        patchId
+      this.logger.info('LLM review completed', {
+        sessionId,
+        skillKey,
+        patchId: result.metadata.patchId,
+        riskLevel,
+        diffLength: proposedDiff.length
       });
 
       return result;
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : String(error);
-      throw new ReviewFailedError(`Failed to run deterministic review: ${message}`);
+      this.logger.error('LLM review failed', { sessionId, skillKey, error: message });
+
+      // Fallback to simple overlay-based diff if LLM fails
+      const fallbackDiff = `# LLM Unavailable - Using Fallback\n\n${overlays.map(o => o.content).join('\n\n')}`;
+      return {
+        isModificationRecommended: true,
+        justification: `LLM unavailable, using fallback. Errors: ${totalErrors}, corrections: ${correctionCount}.`,
+        proposedDiff: fallbackDiff,
+        riskLevel,
+        metadata: {
+          skillKey,
+          patchId: `patch_${Date.now()}`,
+          baseVersion: 'latest',
+          sourceSessionId: sessionId,
+          mergeMode: this.config.merge.requireHumanMerge ? 'manual' : 'auto',
+          riskLevel,
+          rollbackChainDepth: 0
+        }
+      };
     }
   }
 
-  private getRiskLevel(totalErrors: number, correctionCount: number): 'low' | 'medium' | 'high' {
-    const combined = totalErrors + correctionCount;
-    if (combined <= 1) return 'low';
-    if (combined <= 3) return 'medium';
+  private async getSkillContent(skillKey: string): Promise<string> {
+    const cached = this.skillContentCache.get(skillKey);
+    if (cached !== undefined) {
+      return cached;
+    }
+
+    const baseSkillsDir = this.paths?.skillsDir ?? join(process.cwd(), 'skills');
+    const skillPath = join(baseSkillsDir, skillKey, 'SKILL.md');
+    try {
+      const fs = await import('node:fs/promises');
+      const content = await fs.readFile(skillPath, 'utf8');
+      this.skillContentCache.set(skillKey, content);
+      return content;
+    } catch {
+      this.logger.warn('Skill content not found, using empty', { skillKey, path: skillPath });
+      return ''; // Return empty instead of throwing
+    }
+  }
+
+  private async callLLM(prompt: string): Promise<string> {
+    const model = this.config.llm.modelOverride ?? (this.config.llm.inheritPrimaryConfig
+      ? 'openrouter/stepfun/step-3.5-flash:free'
+      : null);
+
+    if (!model) {
+      throw new Error('No LLM model configured. Set skillEvolution.llm.modelOverride or enable inheritPrimaryConfig.');
+    }
+
+    this.logger.debug('Attempting LLM call', { model, promptLength: prompt.length });
+
+    const resolved = this.resolveProvider(model);
+
+    this.logger.debug('LLM provider resolved', {
+      resolvedFrom: resolved.resolvedFrom,
+      baseUrl: resolved.baseUrl,
+      api: resolved.api,
+      modelId: resolved.modelId
+    });
+
+    // Build request based on API type
+    const { baseUrl, apiKey, api: apiType, modelId } = resolved;
+    let endpoint: string;
+    let body: unknown;
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${apiKey}`
+    };
+
+    if (apiType === 'anthropic-messages') {
+      endpoint = `${baseUrl.replace(/\/$/, '')}/messages`;
+      body = {
+        model: modelId,
+        max_tokens: 4096,
+        messages: [
+          { role: 'user', content: prompt }
+        ],
+        stream: false
+      };
+    } else if (apiType === 'openai') {
+      endpoint = `${baseUrl.replace(/\/$/, '')}/chat/completions`;
+      body = {
+        model: modelId,
+        messages: [
+          { role: 'user', content: prompt }
+        ],
+        max_tokens: 4096,
+        stream: false
+      };
+    } else {
+      throw new Error(`Unsupported API type: ${apiType}`);
+    }
+
+    this.logger.debug('Calling LLM endpoint', { endpoint, model: modelId, apiType });
+
+    const response = await fetch(endpoint, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(body)
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`LLM API error ${response.status}: ${errorText.slice(0, 200)}`);
+    }
+
+    const data = await response.json() as Record<string, unknown>;
+
+    // Parse response based on API type
+    let completion: string;
+    if (apiType === 'anthropic-messages') {
+      const content = data.content as Array<{ text?: string }> | undefined;
+      completion = content?.[0]?.text ?? '';
+    } else {
+      const choices = data.choices as Array<{ message?: { content?: string } }> | undefined;
+      completion = choices?.[0]?.message?.content ?? '';
+    }
+
+    if (!completion) {
+      throw new Error('LLM returned empty completion');
+    }
+
+    return completion;
+  }
+
+  /**
+   * Resolves provider via the injected LlmResolver, or falls back to env vars
+   * when no resolver is available (deprecated path).
+   */
+  private resolveProvider(model: string): ResolvedProvider {
+    if (this.llmResolver) {
+      return this.llmResolver.resolve(model);
+    }
+
+    // Deprecated fallback: direct env lookup when resolver not injected
+    this.logger.warn('No LlmResolver injected, using deprecated env-only fallback', {
+      workspaceDir: this.paths?.workspaceDir
+    });
+
+    let extractedModelId = model;
+    if (model.includes('/')) {
+      extractedModelId = model.split('/').slice(1).join('/');
+    }
+
+    const envBaseUrl = process.env.OPENCLAW_ANYROUTER_BASE_URL;
+    const envApiKey = process.env.OPENCLAW_ANYROUTER_API_KEY;
+
+    if (envBaseUrl && envApiKey) {
+      return { baseUrl: envBaseUrl, apiKey: envApiKey, api: 'anthropic-messages', modelId: extractedModelId, resolvedFrom: 'env' };
+    }
+
+    throw new Error('LLM provider not configured. Inject LlmResolver or set env OPENCLAW_ANYROUTER_BASE_URL/API_KEY.');
+  }
+
+  private extractDiff(llmOutput: string): string {
+    // Try to extract markdown sections
+    const proposedMatch = llmOutput.match(/## Proposed Changes\n([\s\S]*?)(?=\n## Original Content\n|$)/);
+    const originalMatch = llmOutput.match(/## Original Content\n([\s\S]*)/);
+
+    if (proposedMatch && originalMatch) {
+      return `## Proposed Changes\n${proposedMatch[1].trim()}\n\n## Original Content\n${originalMatch[1].trim()}`;
+    }
+
+    // Fallback to full output
+    return llmOutput.trim();
+  }
+
+  private getRiskLevel(totalSignals: number): 'low' | 'medium' | 'high' {
+    if (totalSignals <= 1) return 'low';
+    if (totalSignals <= 3) return 'medium';
     return 'high';
   }
 }
 
-export default LlmReviewRunner;
+export default LLMReviewRunner;

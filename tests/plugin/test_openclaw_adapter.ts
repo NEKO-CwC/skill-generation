@@ -15,7 +15,6 @@ import type {
   PluginHookAgentContext,
   PluginHookMessageContext,
   PluginHookToolContext,
-  PluginService,
   SessionEndHandler
 } from '../../src/shared/types.ts';
 import { SkillEvolutionPlugin } from '../../src/plugin/index.ts';
@@ -53,10 +52,6 @@ class MockOpenClawApi implements OpenClawPluginApi {
 
   public on<K extends HookName>(hookName: K, handler: HookHandlerMap[K], opts?: HookOptions): void {
     this.hooks.push({ name: hookName, handler, opts } as RegisteredHook);
-  }
-
-  public registerService(_service: PluginService): void {
-    // no-op for tests
   }
 }
 
@@ -259,7 +254,7 @@ describe('openclaw adapter', () => {
 
     await beforePromptBuild(
       { prompt: 'BASE_PROMPT', messages: [] },
-      { sessionId, skillKey: 'adapter.skill.cleanup' } as PluginHookAgentContext & { skillKey: string }
+      { sessionId, skillKey: 'adapter.skill.cleanup', workspaceDir: tempRoot } as PluginHookAgentContext & { skillKey: string }
     );
 
     await afterToolCall(
@@ -307,7 +302,7 @@ describe('openclaw adapter', () => {
 
     await beforePromptBuild(
       { prompt: 'BASE_PROMPT', messages: [] },
-      { sessionId, skillKey: 'adapter.skill.cleanup' } as PluginHookAgentContext & { skillKey: string }
+      { sessionId, skillKey: 'adapter.skill.cleanup', workspaceDir: tempRoot } as PluginHookAgentContext & { skillKey: string }
     );
 
     await afterToolCall(

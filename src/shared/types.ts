@@ -4,6 +4,7 @@
 
 export interface SkillEvolutionConfig {
   enabled: boolean;
+  workspaceDir?: string;
   merge: {
     requireHumanMerge: boolean;
     maxRollbackVersions: number;
@@ -24,27 +25,10 @@ export interface SkillEvolutionConfig {
     inheritPrimaryConfig: boolean;
     modelOverride: string | null;
     thinkingOverride: boolean | null;
-    mode: 'inherit-or-fallback' | 'explicit' | 'disabled';
-    provider: LlmProviderType;
-    baseUrlOverride: string | null;
-    chatCompletionsPathOverride: string | null;
-    messagesPathOverride: string | null;
-    openrouterSiteUrl: string | null;
-    openrouterAppName: string | null;
-    authProfileRef: string | null;
-    keyRef: SecretRef | null;
-    allowExecSecretRef: boolean;
-    allowGatewayFallback: boolean;
   };
   review: {
-    engine: 'deterministic' | 'llm';
     minEvidenceCount: number;
     allowAutoMergeOnLowRiskOnly: boolean;
-  };
-  queue: {
-    pollIntervalMs: number;
-    leaseMs: number;
-    maxAttempts: number;
   };
 }
 
@@ -57,9 +41,6 @@ export interface FeedbackEvent {
   toolName?: string;
   messageExcerpt?: string;
   proposedOverlay?: string;
-  target?: EvolutionTarget;
-  normalizedError?: NormalizedToolError;
-  noiseDisposition?: NoiseDisposition;
 }
 
 export interface PatchMetadata {
@@ -88,120 +69,14 @@ export interface SessionSummary {
   overlays: OverlayEntry[];
   durationMs: number;
   totalErrors: number;
-  targets?: EvolutionTarget[];
 }
 
 export interface ReviewResult {
   isModificationRecommended: boolean;
   justification: string;
   proposedDiff: string;
-  proposedDocument?: string;
-  changeSummary?: string;
-  evidenceSummary?: string;
-  target?: EvolutionTarget;
   riskLevel: 'low' | 'medium' | 'high';
   metadata: PatchMetadata;
-  reviewSource: 'llm' | 'deterministic';
-}
-
-// ── Evolution Target Types ─────────────────────────────────────────
-
-export interface EvolutionTarget {
-  kind: 'skill' | 'builtin' | 'global' | 'unresolved';
-  key: string;
-  storageKey: string;
-  mergeMode: 'skill-doc' | 'global-doc' | 'queue-only';
-}
-
-export interface NormalizedToolError {
-  status: 'error';
-  toolName: string;
-  message: string;
-  errorType?: string;
-  exitCode?: number;
-  stderr?: string;
-  rawExcerpt: string;
-  fingerprint: string;
-  source: 'event.error' | 'result.status' | 'result.error' | 'text-pattern' | 'unknown';
-}
-
-export interface PendingHint {
-  target: EvolutionTarget;
-  fingerprint: string;
-  count: number;
-  lastError: string;
-  instruction: string;
-  expiresAt: number;
-}
-
-export type NoiseDisposition = 'ignore' | 'low-signal' | 'normal';
-
-// ── LLM Provider Type ─────────────────────────────────────────────
-
-export type LlmProviderType = 'anthropic' | 'openai-compatible' | 'openrouter' | 'custom';
-
-// ── Secret / Auth Types ───────────────────────────────────────────
-
-export interface SecretRef {
-  source: 'env' | 'file' | 'exec';
-  id: string;
-  args?: string[];
-}
-
-export interface ResolvedAuth {
-  apiKey: string;
-  provider: LlmProviderType;
-  baseUrl?: string;
-  profileId?: string;
-  source: 'authProfileRef' | 'keyRef' | 'agent-auth-profile' | 'gateway-fallback';
-}
-
-export interface AuthResolver {
-  resolve(config: SkillEvolutionConfig, agentId?: string): Promise<ResolvedAuth | null>;
-}
-
-// ── Review Task / Queue Types ─────────────────────────────────────
-
-export interface ReviewTask {
-  taskId: string;
-  sessionId: string;
-  agentId: string;
-  target: EvolutionTarget;
-  summary: SessionSummary;
-  status: 'queued' | 'reviewing' | 'done' | 'failed';
-  createdAt: number;
-  updatedAt: number;
-  leaseUntil?: number;
-  workerId?: string;
-  attempts?: number;
-  idempotencyKey?: string;
-  baseVersionHash?: string;
-  result?: ReviewResult;
-  error?: string;
-}
-
-export interface ReviewQueue {
-  enqueue(task: ReviewTask): Promise<void>;
-  dequeue(workerId: string, leaseMs: number): Promise<ReviewTask | null>;
-  complete(taskId: string, result: ReviewResult): Promise<void>;
-  fail(taskId: string, error: string, maxAttempts: number): Promise<void>;
-  listPending(): Promise<ReviewTask[]>;
-}
-
-// ── Plugin Service Types ──────────────────────────────────────────
-
-export interface PluginService {
-  id: string;
-  start(): Promise<void> | void;
-  stop(): Promise<void> | void;
-}
-
-// ── Review Output Types ────────────────────────────────────────────
-
-/** Separated patch outputs: audit report + mergeable document */
-export interface PatchOutput {
-  reportPatch: string;
-  mergeableDocument: string | null;
 }
 
 export interface SkillVersion {
@@ -237,16 +112,57 @@ export interface FeedbackClassifier {
 
 export interface ReviewRunner {
   runReview(summary: SessionSummary): Promise<ReviewResult>;
+  paths?: ResolvedPaths | null;
+}
+
+/**
+ * ReviewRunner that can be refreshed when workspace binding changes.
+ * Clears stale caches and accepts a new LlmResolver instance.
+ */
+export interface RefreshableReviewRunner extends ReviewRunner {
+  refreshRuntimeContext(ctx: {
+    paths: ResolvedPaths;
+    llmRuntimeResolver?: LlmResolver | null;
+  }): void;
+}
+
+/**
+ * Resolves LLM provider configuration from available sources.
+ * Commit A defines the interface; Commit B provides the concrete implementation.
+ */
+export interface LlmResolver {
+  resolve(model: string): ResolvedProvider;
+}
+
+/**
+ * Narrow view of provider configuration injected from the host environment.
+ * Avoids passing the entire openclaw config into the resolver.
+ */
+export interface ProviderConfigSource {
+  providers?: Record<string, {
+    baseUrl: string;
+    apiKey: string;
+    api?: 'openai' | 'anthropic-messages';
+  }>;
+}
+
+/**
+ * Resolved LLM provider details with provenance tracking.
+ */
+export interface ResolvedProvider {
+  baseUrl: string;
+  apiKey: string;
+  api: 'openai' | 'anthropic-messages';
+  modelId: string;
+  resolvedFrom: 'injected' | 'env' | 'openclaw-config' | 'none';
 }
 
 export interface PatchGenerator {
   generate(result: ReviewResult, originalContent: string): string;
-  generateSplit(result: ReviewResult, originalContent: string): PatchOutput;
 }
 
 export interface MergeManager {
   merge(skillKey: string, patchContent: string, metadata: PatchMetadata): Promise<boolean>;
-  mergeWithTarget(target: EvolutionTarget, patchOutput: PatchOutput, metadata: PatchMetadata): Promise<boolean>;
   checkMergePolicy(metadata: PatchMetadata): boolean;
 }
 
@@ -255,30 +171,6 @@ export interface RollbackManager {
   restore(skillKey: string, versionId: string): Promise<void>;
   listVersions(skillKey: string): Promise<SkillVersion[]>;
   pruneOldVersions(skillKey: string): Promise<void>;
-}
-
-export interface TargetResolver {
-  resolve(toolName: string, skillKey: string, ctx?: Record<string, unknown>): EvolutionTarget;
-}
-
-export interface ErrorNormalizer {
-  normalize(toolName: string, event: { result?: unknown; error?: string }): NormalizedToolError | null;
-  safeStringify(value: unknown, maxLength?: number): string;
-}
-
-export interface NoiseFilter {
-  assess(toolName: string, output: string, normalizedError?: NormalizedToolError | null): NoiseDisposition;
-}
-
-export interface PendingHintStore {
-  record(target: EvolutionTarget, fingerprint: string, errorMessage: string, instruction: string): void;
-  getHints(sessionId?: string): PendingHint[];
-  clearExpired(): void;
-  clear(): void;
-}
-
-export interface LlmClient {
-  complete(prompt: string, systemPrompt?: string): Promise<string>;
 }
 
 export interface PluginHooks {
@@ -317,10 +209,6 @@ export interface ResolvedPaths {
   backupsDir: string;
   skillsDir: string;
   feedbackDir: string;
-  globalDir: string;
-  globalToolsDir: string;
-  reviewQueueDir: string;
-  reviewQueueFailedDir: string;
 }
 
 // ── OpenClaw Plugin API Types ──────────────────────────────────────
@@ -332,7 +220,6 @@ export interface OpenClawPluginApi {
   pluginConfig?: Record<string, unknown>;
   logger: unknown;
   on<K extends PluginHookName>(hookName: K, handler: PluginHookHandlerMap[K], opts?: HookOptions): void;
-  registerService(service: PluginService): void;
 }
 
 export type PluginHookName =

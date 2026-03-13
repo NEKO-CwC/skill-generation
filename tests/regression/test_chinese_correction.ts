@@ -45,7 +45,8 @@ describe('Regression: Chinese correction without tool errors', () => {
       totalErrors: 0
     });
     expect(review.isModificationRecommended).toBe(true);
-    expect(review.justification).toContain('1 corrections');
+    // LLM fallback justification contains both errors and corrections count
+    expect(review.justification).toMatch(/corrections?:\s*1/);
   });
 
   it('Chinese positive feedback is classified correctly', async () => {

@@ -6,9 +6,35 @@ import { ReviewFailedError } from '../shared/errors.js';
 import ConsoleLogger from '../shared/logger.js';
 import type { ReviewResult, ReviewRunner, SessionSummary } from '../shared/types.js';
 import type { SkillEvolutionConfig } from '../shared/types.js';
-import { getDefaultConfig } from '../plugin/config.js';
 
-const DEFAULT_CONFIG: SkillEvolutionConfig = getDefaultConfig();
+const DEFAULT_CONFIG: SkillEvolutionConfig = {
+  enabled: true,
+  merge: {
+    requireHumanMerge: true,
+    maxRollbackVersions: 5
+  },
+  sessionOverlay: {
+    enabled: true,
+    storageDir: '.skill-overlays',
+    injectMode: 'system-context',
+    clearOnSessionEnd: true
+  },
+  triggers: {
+    onToolError: true,
+    onUserCorrection: true,
+    onSessionEndReview: true,
+    onPositiveFeedback: true
+  },
+  llm: {
+    inheritPrimaryConfig: true,
+    modelOverride: null,
+    thinkingOverride: null
+  },
+  review: {
+    minEvidenceCount: 2,
+    allowAutoMergeOnLowRiskOnly: false
+  }
+};
 
 export class ReviewRunnerImpl implements ReviewRunner {
   private readonly config: SkillEvolutionConfig;
@@ -39,7 +65,6 @@ export class ReviewRunnerImpl implements ReviewRunner {
         justification: `Session had ${summary.totalErrors} errors, ${correctionCount} corrections, ${positiveCount} positive signals, and ${overlayCount} overlays.`,
         proposedDiff,
         riskLevel,
-        reviewSource: 'deterministic',
         metadata: {
           skillKey: summary.skillKey,
           patchId,

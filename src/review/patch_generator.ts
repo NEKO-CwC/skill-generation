@@ -2,49 +2,28 @@
  * Patch generator implementing reviewed diff materialization contract.
  */
 
-import type { PatchGenerator, PatchOutput, ReviewResult } from '../shared/types.js';
+import type { PatchGenerator, ReviewResult } from '../shared/types.js';
 
+/**
+ * Default patch generator placeholder implementation.
+ */
 export class PatchGeneratorImpl implements PatchGenerator {
+  /**
+   * Generates patch output based on review result.
+   */
   public generate(result: ReviewResult, originalContent: string): string {
-    return this.generateReportPatch(result, originalContent);
-  }
-
-  public generateSplit(result: ReviewResult, originalContent: string): PatchOutput {
-    const reportPatch = this.generateReportPatch(result, originalContent);
-    const mergeableDocument = result.proposedDocument ?? null;
-
-    return { reportPatch, mergeableDocument };
-  }
-
-  private generateReportPatch(result: ReviewResult, originalContent: string): string {
-    const lines = [
+    return [
       `--- PATCH: ${result.metadata.skillKey} ---`,
       `Patch ID: ${result.metadata.patchId}`,
       `Risk: ${result.riskLevel}`,
       `Source Session: ${result.metadata.sourceSessionId}`,
-      `Review Source: ${result.reviewSource}`,
-    ];
-
-    if (result.target) {
-      lines.push(`Target: ${result.target.kind}:${result.target.key}`);
-    }
-
-    if (result.changeSummary) {
-      lines.push('', '## Change Summary', result.changeSummary);
-    }
-
-    if (result.evidenceSummary) {
-      lines.push('', '## Evidence Summary', result.evidenceSummary);
-    }
-
-    lines.push('', '## Proposed Changes', result.proposedDiff);
-    lines.push('', '## Original Content', originalContent);
-
-    if (result.proposedDocument) {
-      lines.push('', '## Proposed Document', result.proposedDocument);
-    }
-
-    return lines.join('\n');
+      '',
+      '## Proposed Changes',
+      result.proposedDiff,
+      '',
+      '## Original Content',
+      originalContent
+    ].join('\n');
   }
 }
 

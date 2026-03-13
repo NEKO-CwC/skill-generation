@@ -5,6 +5,52 @@
 import type { FeedbackEvent, OverlayEntry } from '../../shared/types.js';
 import type { SkillEvolutionPlugin } from '../index.js';
 
+function isToolError(isError: boolean, output: string, rawResult?: unknown): boolean {
+  if (isError) {
+    return true;
+  }
+
+  if (rawResult && typeof rawResult === 'object') {
+    const record = rawResult as Record<string, unknown>;
+    if (record.status === 'error') {
+      return true;
+    }
+
+    if ('error' in record && record.error !== undefined && record.error !== null && record.error !== '') {
+      return true;
+    }
+  }
+
+  if (output && /\b(error|failed|unauthorized|timeout|missing api key)\b/i.test(output)) {
+    return true;
+  }
+
+  return false;
+}
+
+/**
+ * Serializes output or error for human-readable logging.
+ * Handles objects by JSON.stringify, primitives by String().
+ */
+function serializeForExcerpt(value: unknown, maxLength: number): string {
+  if (value === null || value === undefined) {
+    return '';
+  }
+
+  let text: string;
+  if (typeof value === 'object') {
+    try {
+      text = JSON.stringify(value);
+    } catch {
+      text = String(value);
+    }
+  } else {
+    text = String(value);
+  }
+
+  return text.length <= maxLength ? text : text.slice(0, maxLength) + '...';
+}
+
 export async function after_tool_call(
   plugin: SkillEvolutionPlugin,
   sessionId: string,
@@ -15,68 +61,36 @@ export async function after_tool_call(
 ): Promise<void> {
   plugin.ensureSessionStarted(sessionId);
   const skillKey = plugin.getSessionSkillKey(sessionId);
+  const detectedError = isToolError(isError, output, rawResult);
+  const eventType = plugin.feedbackClassifier.classify(output, detectedError);
 
-  const normalizedError = plugin.errorNormalizer.normalize(toolName, {
-    result: rawResult,
-    error: isError ? output : undefined
-  });
-
-  const safeOutput = plugin.errorNormalizer.safeStringify(rawResult ?? output);
-  const detectedError = isError || normalizedError !== null;
-
-  const noiseDisposition = detectedError
-    ? plugin.noiseFilter.assess(toolName, safeOutput, normalizedError)
-    : 'normal' as const;
-
-  if (noiseDisposition === 'ignore') {
-    plugin.logger.debug('Noise filtered: ignoring tool event', { sessionId, toolName, noiseDisposition });
-    return;
-  }
-
-  const target = plugin.targetResolver.resolve(toolName, skillKey);
-  plugin.addSessionTarget(sessionId, target);
-
-  const eventType = plugin.feedbackClassifier.classify(safeOutput, detectedError);
   if (eventType === null) {
     return;
   }
 
   const priorEvents = await plugin.feedbackCollector.getSessionFeedback(sessionId);
+  const severity = plugin.feedbackClassifier.assessSeverity(priorEvents);
+
   const event: FeedbackEvent = {
     sessionId,
     skillKey,
     timestamp: Date.now(),
     eventType,
-    severity: plugin.feedbackClassifier.assessSeverity(priorEvents),
+    severity,
     toolName,
-    messageExcerpt: safeOutput.slice(0, 280),
-    target,
-    normalizedError: normalizedError ?? undefined,
-    noiseDisposition
+    messageExcerpt: serializeForExcerpt(output, 280)
   };
   await plugin.feedbackCollector.collect(event);
-
-  if (normalizedError && detectedError) {
-    plugin.pendingHintStore.record(
-      target,
-      normalizedError.fingerprint,
-      normalizedError.message,
-      `Avoid prior failure mode for ${toolName}: ${normalizedError.message.slice(0, 200)}`
-    );
-  }
-
-  if (noiseDisposition === 'low-signal') {
-    return;
-  }
 
   if (!detectedError || !plugin.config.triggers.onToolError || !plugin.config.sessionOverlay.enabled) {
     return;
   }
 
+  const errorExcerpt = serializeForExcerpt(rawResult ?? output, 400);
   const overlayEntry: OverlayEntry = {
     sessionId,
-    skillKey: target.storageKey,
-    content: `Tool error observed for ${toolName}. Avoid prior failure mode.\nError excerpt: ${safeOutput.slice(0, 400)}`,
+    skillKey,
+    content: `Tool error observed for ${toolName}. Avoid prior failure mode.\nError excerpt: ${errorExcerpt}`,
     createdAt: Date.now(),
     updatedAt: Date.now(),
     reasoning: 'Generated from onToolError trigger after failed tool call.'

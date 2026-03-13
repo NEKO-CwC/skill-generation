@@ -79,7 +79,7 @@ It is **not**:
 * a `SKILL.md`-based skill
 * a slash-command-only skill bundle
 
-Never install this repository into `~/.openclaw/skills/` or `{workspace}/skills/`.
+Never install this repository into `~/.openclaw/skills/` or `<workspace>/skills/`.
 
 ### What this repo already contains
 
@@ -233,8 +233,8 @@ Run a small real test:
 2. Trigger a tool error or give a direct correction
 3. Confirm overlay files and feedback logs appear:
 
-   * `.skill-overlays/{session-id}/` (overlays)
-   * `.skill-feedback/{session-id}.jsonl` (feedback events)
+   * `.skill-overlays/<session-id>/` (overlays)
+   * `.skill-feedback/<session-id>.jsonl` (feedback events)
 4. End the session (triggers `session_end` hook)
 5. Check the result:
 

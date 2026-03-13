@@ -14,8 +14,7 @@ import type {
   OpenClawPluginApi,
   PluginHookAgentContext,
   PluginHookMessageContext,
-  PluginHookToolContext,
-  PluginService
+  PluginHookToolContext
 } from '../../src/shared/types.ts';
 
 type HookName = 'before_prompt_build' | 'after_tool_call' | 'message_received' | 'agent_end' | 'session_end';
@@ -47,10 +46,6 @@ class MockOpenClawApi implements OpenClawPluginApi {
 
   public on<K extends HookName>(hookName: K, handler: HookHandlerMap[K], opts?: HookOptions): void {
     this.hooks.push({ name: hookName, handler, opts } as RegisteredHook);
-  }
-
-  public registerService(_service: PluginService): void {
-    // no-op for tests
   }
 }
 
@@ -91,7 +86,7 @@ describe('Regression: Session ID consistency across hooks', () => {
 
     await beforePromptBuild(
       { prompt: 'BASE', messages: [] },
-      { sessionId: sharedSessionId, skillKey: 'session.test' } as PluginHookAgentContext & { skillKey: string }
+      { sessionId: sharedSessionId, skillKey: 'session.test', workspaceDir: tempRoot } as PluginHookAgentContext & { skillKey: string }
     );
 
     await afterToolCall(

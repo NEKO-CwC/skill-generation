@@ -1,8 +1,8 @@
 {
   "id": "skill-evolution",
   "name": "Skill Evolution",
-  "description": "Evolves OpenClaw skills from real usage feedback via session overlays, deterministic or LLM review, background review service, and safe merge with rollback protection.",
-  "version": "0.2.0",
+  "description": "Evolves OpenClaw skills from real usage feedback via session overlays, deterministic review, and safe merge with rollback protection.",
+  "version": "0.1.0",
   "configSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -83,82 +83,18 @@
             "default": true
           },
           "modelOverride": {
-            "type": ["string", "null"],
-            "default": null
-          },
-          "thinkingOverride": {
-            "type": ["boolean", "null"],
-            "default": null
-          },
-          "mode": {
-            "type": "string",
-            "enum": ["inherit-or-fallback", "explicit", "disabled"],
-            "default": "disabled"
-          },
-          "provider": {
-            "type": "string",
-            "enum": ["anthropic", "openai-compatible", "openrouter", "custom"],
-            "default": "anthropic"
-          },
-          "baseUrlOverride": {
-            "type": ["string", "null"],
-            "default": null
-          },
-          "chatCompletionsPathOverride": {
-            "type": ["string", "null"],
-            "default": null,
-            "description": "Override the chat completions endpoint path (e.g. /v1/chat/completions). When null, uses the provider default."
-          },
-          "messagesPathOverride": {
-            "type": ["string", "null"],
-            "default": null,
-            "description": "Override the Anthropic messages endpoint path (e.g. /v1/messages). When null, uses the provider default."
-          },
-          "openrouterSiteUrl": {
-            "type": ["string", "null"],
-            "default": null,
-            "description": "Site URL sent as HTTP-Referer header for OpenRouter requests."
-          },
-          "openrouterAppName": {
-            "type": ["string", "null"],
-            "default": null,
-            "description": "App name sent as X-Title header for OpenRouter requests."
-          },
-          "authProfileRef": {
-            "type": ["string", "null"],
-            "default": null
-          },
-          "keyRef": {
-            "oneOf": [
-              { "type": "null" },
-              {
-                "type": "object",
-                "additionalProperties": false,
-                "properties": {
-                  "source": {
-                    "type": "string",
-                    "enum": ["env", "file", "exec"]
-                  },
-                  "id": {
-                    "type": "string"
-                  },
-                  "args": {
-                    "type": "array",
-                    "items": { "type": "string" }
-                  }
-                },
-                "required": ["source", "id"]
-              }
+            "type": [
+              "string",
+              "null"
             ],
             "default": null
           },
-          "allowExecSecretRef": {
-            "type": "boolean",
-            "default": false
-          },
-          "allowGatewayFallback": {
-            "type": "boolean",
-            "default": false
+          "thinkingOverride": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "default": null
           }
         }
       },
@@ -166,11 +102,6 @@
         "type": "object",
         "additionalProperties": false,
         "properties": {
-          "engine": {
-            "type": "string",
-            "enum": ["deterministic", "llm"],
-            "default": "deterministic"
-          },
           "minEvidenceCount": {
             "type": "integer",
             "minimum": 0,
@@ -179,27 +110,6 @@
           "allowAutoMergeOnLowRiskOnly": {
             "type": "boolean",
             "default": false
-          }
-        }
-      },
-      "queue": {
-        "type": "object",
-        "additionalProperties": false,
-        "properties": {
-          "pollIntervalMs": {
-            "type": "integer",
-            "minimum": 1000,
-            "default": 30000
-          },
-          "leaseMs": {
-            "type": "integer",
-            "minimum": 10000,
-            "default": 300000
-          },
-          "maxAttempts": {
-            "type": "integer",
-            "minimum": 1,
-            "default": 3
           }
         }
       }
