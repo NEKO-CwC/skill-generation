@@ -4,6 +4,7 @@
 
 export interface SkillEvolutionConfig {
   enabled: boolean;
+  workspaceDir?: string;
   merge: {
     requireHumanMerge: boolean;
     maxRollbackVersions: number;
@@ -131,9 +132,16 @@ export interface RollbackManager {
 
 export interface PluginHooks {
   before_prompt_build(sessionId: string, skillKey: string, currentPrompt: string): Promise<string>;
-  after_tool_call(sessionId: string, toolName: string, output: string, isError: boolean): Promise<void>;
+  after_tool_call(
+    sessionId: string,
+    toolName: string,
+    output: string,
+    isError: boolean,
+    rawResult?: unknown
+  ): Promise<void>;
   message_received(sessionId: string, message: string): Promise<void>;
   agent_end(sessionId: string): Promise<void>;
+  session_end(sessionId: string): Promise<void>;
 }
 
 export interface SkillEvolutionConfigFile {
@@ -151,33 +159,65 @@ export interface Logger {
   error(message: string, context?: UnknownRecord): void;
 }
 
+export interface ResolvedPaths {
+  workspaceDir: string;
+  overlaysDir: string;
+  patchesDir: string;
+  backupsDir: string;
+  skillsDir: string;
+  feedbackDir: string;
+}
+
 // ── OpenClaw Plugin API Types ──────────────────────────────────────
 
 /** The API object passed to the plugin's register function by OpenClaw. */
-export interface OpenClawPluginAPI {
-  on(hook: 'before_prompt_build', handler: BeforePromptBuildHandler, opts?: HookOptions): void;
-  on(hook: 'after_tool_call', handler: AfterToolCallHandler, opts?: HookOptions): void;
-  on(hook: 'message_received', handler: MessageReceivedHandler, opts?: HookOptions): void;
-  on(hook: 'agent_end', handler: AgentEndHandler, opts?: HookOptions): void;
-  getConfig(): Record<string, unknown>;
+export interface OpenClawPluginApi {
+  id: string;
+  name: string;
+  pluginConfig?: Record<string, unknown>;
+  logger: unknown;
+  on<K extends PluginHookName>(hookName: K, handler: PluginHookHandlerMap[K], opts?: HookOptions): void;
 }
+
+export type PluginHookName =
+  | 'before_prompt_build'
+  | 'after_tool_call'
+  | 'message_received'
+  | 'agent_end'
+  | 'session_end';
 
 export interface HookOptions {
   priority?: number;
 }
 
 export interface PluginHookAgentContext {
-  sessionId: string;
   agentId?: string;
-  [key: string]: unknown;
+  sessionKey?: string;
+  sessionId?: string;
+  workspaceDir?: string;
+  messageProvider?: string;
+  trigger?: string;
+  channelId?: string;
+}
+
+export interface PluginHookToolContext {
+  agentId?: string;
+  sessionKey?: string;
+  sessionId?: string;
+  runId?: string;
+  toolName: string;
+  toolCallId?: string;
+}
+
+export interface PluginHookMessageContext {
+  channelId: string;
+  accountId?: string;
+  conversationId?: string;
 }
 
 export interface BeforePromptBuildEvent {
   prompt: string;
   messages: unknown[];
-  modelId?: string;
-  provider?: string;
-  [key: string]: unknown;
 }
 
 export interface BeforePromptBuildResult {
@@ -193,34 +233,59 @@ export type BeforePromptBuildHandler = (
 ) => BeforePromptBuildResult | undefined | Promise<BeforePromptBuildResult | undefined>;
 
 export interface AfterToolCallEvent {
-  tool: string;
-  result: string;
-  isError?: boolean;
-  [key: string]: unknown;
+  toolName: string;
+  params: Record<string, unknown>;
+  runId?: string;
+  toolCallId?: string;
+  result?: unknown;
+  error?: string;
+  durationMs?: number;
 }
 
 export type AfterToolCallHandler = (
   event: AfterToolCallEvent,
-  ctx: PluginHookAgentContext
+  ctx: PluginHookToolContext
 ) => void | Promise<void>;
 
 export interface MessageReceivedEvent {
-  message: string;
-  role?: string;
-  [key: string]: unknown;
+  from: string;
+  content: string;
+  timestamp?: number;
+  metadata?: Record<string, unknown>;
 }
 
 export type MessageReceivedHandler = (
   event: MessageReceivedEvent,
-  ctx: PluginHookAgentContext
+  ctx: PluginHookMessageContext
 ) => void | Promise<void>;
 
 export interface AgentEndEvent {
-  summary?: string;
-  [key: string]: unknown;
+  messages: unknown[];
+  success: boolean;
+  error?: string;
+  durationMs?: number;
 }
 
 export type AgentEndHandler = (
   event: AgentEndEvent,
   ctx: PluginHookAgentContext
 ) => void | Promise<void>;
+
+export interface SessionEndEvent {
+  sessionId?: string;
+  reason?: 'user_reset' | 'timeout' | 'shutdown' | 'explicit';
+  durationMs?: number;
+}
+
+export type SessionEndHandler = (
+  event: SessionEndEvent,
+  ctx: PluginHookAgentContext
+) => void | Promise<void>;
+
+export type PluginHookHandlerMap = {
+  before_prompt_build: BeforePromptBuildHandler;
+  after_tool_call: AfterToolCallHandler;
+  message_received: MessageReceivedHandler;
+  agent_end: AgentEndHandler;
+  session_end: SessionEndHandler;
+};

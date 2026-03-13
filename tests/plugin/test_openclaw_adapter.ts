@@ -7,20 +7,26 @@ import register from '../../src/openclaw.ts';
 import type {
   AgentEndHandler,
   AfterToolCallHandler,
+  BeforePromptBuildEvent,
   BeforePromptBuildHandler,
   HookOptions,
   MessageReceivedHandler,
-  OpenClawPluginAPI
+  OpenClawPluginApi,
+  PluginHookAgentContext,
+  PluginHookMessageContext,
+  PluginHookToolContext,
+  SessionEndHandler
 } from '../../src/shared/types.ts';
 import { SkillEvolutionPlugin } from '../../src/plugin/index.ts';
 
-type HookName = 'before_prompt_build' | 'after_tool_call' | 'message_received' | 'agent_end';
+type HookName = 'before_prompt_build' | 'after_tool_call' | 'message_received' | 'agent_end' | 'session_end';
 
 type HookHandlerMap = {
   before_prompt_build: BeforePromptBuildHandler;
   after_tool_call: AfterToolCallHandler;
   message_received: MessageReceivedHandler;
   agent_end: AgentEndHandler;
+  session_end: SessionEndHandler;
 };
 
 type RegisteredHook = {
@@ -29,45 +35,23 @@ type RegisteredHook = {
   opts?: HookOptions;
 };
 
-class MockOpenClawApi implements OpenClawPluginAPI {
+class MockOpenClawApi implements OpenClawPluginApi {
+  public readonly id = 'skill-evolution';
+
+  public readonly name = 'Skill Evolution';
+
+  public readonly logger: unknown = {};
+
+  public readonly pluginConfig?: Record<string, unknown>;
+
   public readonly hooks: RegisteredHook[] = [];
 
-  private readonly config: Record<string, unknown>;
-
-  public constructor(config: Record<string, unknown> = {}) {
-    this.config = config;
+  public constructor(config: Record<string, unknown> | undefined = {}) {
+    this.pluginConfig = config;
   }
 
-  public on(hook: 'before_prompt_build', handler: BeforePromptBuildHandler, opts?: HookOptions): void;
-
-  public on(hook: 'after_tool_call', handler: AfterToolCallHandler, opts?: HookOptions): void;
-
-  public on(hook: 'message_received', handler: MessageReceivedHandler, opts?: HookOptions): void;
-
-  public on(hook: 'agent_end', handler: AgentEndHandler, opts?: HookOptions): void;
-
-  public on(
-    hook: HookName,
-    handler: BeforePromptBuildHandler | AfterToolCallHandler | MessageReceivedHandler | AgentEndHandler,
-    opts?: HookOptions
-  ): void {
-    if (hook === 'before_prompt_build') {
-      this.hooks.push({ name: hook, handler, opts });
-      return;
-    }
-    if (hook === 'after_tool_call') {
-      this.hooks.push({ name: hook, handler, opts });
-      return;
-    }
-    if (hook === 'message_received') {
-      this.hooks.push({ name: hook, handler, opts });
-      return;
-    }
-    this.hooks.push({ name: hook, handler, opts });
-  }
-
-  public getConfig(): Record<string, unknown> {
-    return this.config;
+  public on<K extends HookName>(hookName: K, handler: HookHandlerMap[K], opts?: HookOptions): void {
+    this.hooks.push({ name: hookName, handler, opts } as RegisteredHook);
   }
 }
 
@@ -75,6 +59,7 @@ function getHook(api: MockOpenClawApi, name: 'before_prompt_build'): BeforePromp
 function getHook(api: MockOpenClawApi, name: 'after_tool_call'): AfterToolCallHandler;
 function getHook(api: MockOpenClawApi, name: 'message_received'): MessageReceivedHandler;
 function getHook(api: MockOpenClawApi, name: 'agent_end'): AgentEndHandler;
+function getHook(api: MockOpenClawApi, name: 'session_end'): SessionEndHandler;
 function getHook(api: MockOpenClawApi, name: HookName): HookHandlerMap[HookName] {
   const hook = api.hooks.find((entry) => entry.name === name);
   if (!hook) {
@@ -99,17 +84,18 @@ describe('openclaw adapter', () => {
     await rm(tempRoot, { recursive: true, force: true });
   });
 
-  it('registers all four hooks when enabled', () => {
+  it('registers all five hooks when enabled', () => {
     const api = new MockOpenClawApi({ enabled: true });
 
     register(api);
 
-    expect(api.hooks).toHaveLength(4);
+    expect(api.hooks).toHaveLength(5);
     expect(api.hooks.map((entry) => entry.name)).toEqual([
       'before_prompt_build',
       'after_tool_call',
       'message_received',
-      'agent_end'
+      'agent_end',
+      'session_end'
     ]);
     for (const hook of api.hooks) {
       expect(hook.opts?.priority).toBe(50);
@@ -136,11 +122,11 @@ describe('openclaw adapter', () => {
     expect(api.hooks).toHaveLength(0);
   });
 
-  it('uses default config when getConfig returns empty object', () => {
+  it('uses default config when pluginConfig is empty object', () => {
     const api = new MockOpenClawApi({});
 
     expect(() => register(api)).not.toThrow();
-    expect(api.hooks).toHaveLength(4);
+    expect(api.hooks).toHaveLength(5);
   });
 
   it('falls back to defaults on invalid config', () => {
@@ -151,7 +137,7 @@ describe('openclaw adapter', () => {
     });
 
     expect(() => register(api)).not.toThrow();
-    expect(api.hooks).toHaveLength(4);
+    expect(api.hooks).toHaveLength(5);
   });
 
   it('logs allowPromptInjection degradation notice at registration', () => {
@@ -174,12 +160,12 @@ describe('openclaw adapter', () => {
 
     await beforePromptBuild(
       { prompt: 'BASE_PROMPT', messages: [] },
-      { sessionId, skillKey: 'adapter.skill' }
+      { sessionId, channelId: 'channel', skillKey: 'adapter.skill' } as PluginHookAgentContext & { skillKey: string }
     );
 
     await afterToolCall(
-      { tool: 'shell', result: 'Error: command failed', isError: true },
-      { sessionId }
+      { toolName: 'shell', params: {}, error: 'Error: command failed', result: undefined },
+      { sessionId, toolName: 'shell' } as PluginHookToolContext
     );
 
     const result = await beforePromptBuild(
@@ -200,7 +186,7 @@ describe('openclaw adapter', () => {
     const beforePromptBuild = getHook(api, 'before_prompt_build');
     const result = await beforePromptBuild(
       { prompt: 'BASE_PROMPT', messages: [] },
-      { sessionId: 'session-no-overlay', skillKey: 'adapter.skill' }
+      { sessionId: 'session-no-overlay', skillKey: 'adapter.skill' } as PluginHookAgentContext & { skillKey: string }
     );
 
     expect(result).toBeUndefined();
@@ -213,8 +199,12 @@ describe('openclaw adapter', () => {
 
     const beforePromptBuild = getHook(api, 'before_prompt_build');
     await beforePromptBuild(
-      { prompt: 'BASE_PROMPT', messages: [], skillKey: 'event-skill' },
-      { sessionId: 'session-skill-resolution', skillKey: 'my-skill' }
+      { prompt: 'BASE_PROMPT', messages: [], skillKey: 'event-skill' } as BeforePromptBuildEvent & {
+        skillKey: string;
+      },
+      { sessionId: 'session-skill-resolution', skillKey: 'my-skill' } as PluginHookAgentContext & {
+        skillKey: string;
+      }
     );
 
     expect(beforeSpy).toHaveBeenCalledWith('session-skill-resolution', 'my-skill', 'BASE_PROMPT');
@@ -227,11 +217,11 @@ describe('openclaw adapter', () => {
 
     const afterToolCall = getHook(api, 'after_tool_call');
     await afterToolCall(
-      { tool: 'build', result: 'Error: unresolved symbol', isError: true },
-      { sessionId: 'session-after-tool' }
+      { toolName: 'build', params: {}, error: 'Error: unresolved symbol' },
+      { sessionId: 'session-after-tool', toolName: 'build' } as PluginHookToolContext
     );
 
-    expect(afterSpy).toHaveBeenCalledWith('session-after-tool', 'build', 'Error: unresolved symbol', true);
+    expect(afterSpy).toHaveBeenCalledWith('session-after-tool', 'build', 'Error: unresolved symbol', true, undefined);
   });
 
   it('message_received maps event fields correctly', async () => {
@@ -241,14 +231,14 @@ describe('openclaw adapter', () => {
 
     const messageReceived = getHook(api, 'message_received');
     await messageReceived(
-      { message: 'you should have done this instead', role: 'user' },
-      { sessionId: 'session-message' }
+      { from: 'user', content: 'you should have done this instead' },
+      { channelId: 'session-message' } as PluginHookMessageContext
     );
 
     expect(messageSpy).toHaveBeenCalledWith('session-message', 'you should have done this instead');
   });
 
-  it('agent_end calls plugin.agent_end and performs session cleanup', async () => {
+  it('agent_end calls plugin.agent_end and does not perform session cleanup', async () => {
     const api = new MockOpenClawApi({
       review: {
         minEvidenceCount: 999
@@ -259,16 +249,17 @@ describe('openclaw adapter', () => {
     const beforePromptBuild = getHook(api, 'before_prompt_build');
     const afterToolCall = getHook(api, 'after_tool_call');
     const agentEnd = getHook(api, 'agent_end');
+    const sessionEnd = getHook(api, 'session_end');
     const sessionId = 'session-end';
 
     await beforePromptBuild(
       { prompt: 'BASE_PROMPT', messages: [] },
-      { sessionId, skillKey: 'adapter.skill.cleanup' }
+      { sessionId, skillKey: 'adapter.skill.cleanup' } as PluginHookAgentContext & { skillKey: string }
     );
 
     await afterToolCall(
-      { tool: 'test', result: 'Error: first failure', isError: true },
-      { sessionId }
+      { toolName: 'test', params: {}, error: 'Error: first failure' },
+      { sessionId, toolName: 'test' } as PluginHookToolContext
     );
 
     const withOverlay = await beforePromptBuild(
@@ -278,8 +269,56 @@ describe('openclaw adapter', () => {
     expect(withOverlay?.prependSystemContext).toContain('--- SKILL OVERLAY (session-local) ---');
 
     const agentEndSpy = vi.spyOn(SkillEvolutionPlugin.prototype, 'agent_end');
-    await agentEnd({}, { sessionId });
+    await agentEnd({ messages: [], success: true }, { sessionId });
     expect(agentEndSpy).toHaveBeenCalledWith(sessionId);
+
+    const afterAgentEnd = await beforePromptBuild(
+      { prompt: 'BASE_PROMPT', messages: [] },
+      { sessionId }
+    );
+    expect(afterAgentEnd?.prependSystemContext).toContain('--- SKILL OVERLAY (session-local) ---');
+
+    await sessionEnd({ sessionId, reason: 'explicit' }, { sessionId });
+
+    const afterSessionEnd = await beforePromptBuild(
+      { prompt: 'BASE_PROMPT', messages: [] },
+      { sessionId }
+    );
+    expect(afterSessionEnd).toBeUndefined();
+  });
+
+  it('session_end calls plugin.session_end and performs cleanup', async () => {
+    const api = new MockOpenClawApi({
+      review: {
+        minEvidenceCount: 999
+      }
+    });
+    register(api);
+
+    const beforePromptBuild = getHook(api, 'before_prompt_build');
+    const afterToolCall = getHook(api, 'after_tool_call');
+    const sessionEnd = getHook(api, 'session_end');
+    const sessionId = 'session-cleanup-only';
+
+    await beforePromptBuild(
+      { prompt: 'BASE_PROMPT', messages: [] },
+      { sessionId, skillKey: 'adapter.skill.cleanup' } as PluginHookAgentContext & { skillKey: string }
+    );
+
+    await afterToolCall(
+      { toolName: 'test', params: {}, error: 'Error: first failure' },
+      { sessionId, toolName: 'test' } as PluginHookToolContext
+    );
+
+    const withOverlay = await beforePromptBuild(
+      { prompt: 'BASE_PROMPT', messages: [] },
+      { sessionId }
+    );
+    expect(withOverlay?.prependSystemContext).toContain('--- SKILL OVERLAY (session-local) ---');
+
+    const sessionEndSpy = vi.spyOn(SkillEvolutionPlugin.prototype, 'session_end');
+    await sessionEnd({ sessionId, reason: 'explicit' }, { sessionId });
+    expect(sessionEndSpy).toHaveBeenCalledWith(sessionId);
 
     const afterCleanup = await beforePromptBuild(
       { prompt: 'BASE_PROMPT', messages: [] },

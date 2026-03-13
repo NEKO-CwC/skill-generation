@@ -6,7 +6,6 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { getDefaultConfig } from '../../src/plugin/config.ts';
 import { SkillEvolutionPlugin } from '../../src/plugin/index.ts';
-import { MergeManagerImpl } from '../../src/review/merge_manager.ts';
 
 async function pathExists(path: string): Promise<boolean> {
   try {
@@ -19,23 +18,12 @@ async function pathExists(path: string): Promise<boolean> {
 
 function buildPlugin(tempRoot: string, requireHumanMerge: boolean, maxRollbackVersions = 5): SkillEvolutionPlugin {
   const config = getDefaultConfig();
-  config.sessionOverlay.storageDir = join(tempRoot, 'overlay-store');
+  config.sessionOverlay.storageDir = '.skill-overlays';
   config.triggers.onSessionEndReview = true;
   config.review.minEvidenceCount = 1;
   config.merge.requireHumanMerge = requireHumanMerge;
   config.merge.maxRollbackVersions = maxRollbackVersions;
-
-  const plugin = new SkillEvolutionPlugin(config);
-
-  const mergeConfig = getDefaultConfig();
-  mergeConfig.merge.requireHumanMerge = requireHumanMerge;
-  mergeConfig.merge.maxRollbackVersions = maxRollbackVersions;
-
-  Object.defineProperty(plugin, 'mergeManager', {
-    value: new MergeManagerImpl(mergeConfig, undefined, 'skills', '.skill-patches')
-  });
-
-  return plugin;
+  return new SkillEvolutionPlugin(config, tempRoot);
 }
 
 describe('Workflow 1: Tool error -> overlay creation', () => {
@@ -73,7 +61,7 @@ describe('Workflow 1: Tool error -> overlay creation', () => {
 
     const overlayPath = join(
       tempRoot,
-      'overlay-store',
+      '.skill-overlays',
       encodeURIComponent(sessionId),
       `${encodeURIComponent(skillKey)}.json`
     );
@@ -101,14 +89,14 @@ describe('Workflow 2: Session end -> review -> patch generation', () => {
     await rm(tempRoot, { recursive: true, force: true });
   });
 
-  it('runs review on agent_end, writes merged content, and clears overlays', async () => {
+  it('runs review on session_end, writes merged content, and clears overlays', async () => {
     const plugin = buildPlugin(tempRoot, false);
     const sessionId = 'workflow-2-session';
     const skillKey = 'skill.workflow.2';
 
     await plugin.before_prompt_build(sessionId, skillKey, 'BASE');
     await plugin.after_tool_call(sessionId, 'build', 'Error: unresolved symbol', true);
-    await plugin.agent_end(sessionId);
+    await plugin.session_end(sessionId);
 
     const skillFilePath = join('skills', skillKey, 'SKILL.md');
     expect(await pathExists(skillFilePath)).toBe(true);
@@ -150,7 +138,7 @@ describe('Workflow 3: Manual merge blocks auto-write', () => {
 
     await plugin.before_prompt_build(sessionId, skillKey, 'BASE');
     await plugin.after_tool_call(sessionId, 'lint', 'Error: style violation', true);
-    await plugin.agent_end(sessionId);
+    await plugin.session_end(sessionId);
 
     const after = await readFile(skillFilePath, 'utf8');
     expect(after).toBe('ORIGINAL_SKILL_CONTENT');
@@ -194,7 +182,7 @@ describe('Workflow 4: Auto merge writes + backs up + prunes', () => {
 
       await plugin.before_prompt_build(sessionId, skillKey, 'BASE');
       await plugin.after_tool_call(sessionId, 'test', `Error: iteration-${i}`, true);
-      await plugin.agent_end(sessionId);
+      await plugin.session_end(sessionId);
 
       const skillContent = await readFile(skillFilePath, 'utf8');
       expect(skillContent).toContain(`Source Session: ${sessionId}`);
@@ -215,5 +203,55 @@ describe('Workflow 4: Auto merge writes + backs up + prunes', () => {
 
     const finalBackups = (await readdir(backupDir)).filter((name) => name.endsWith('.json'));
     expect(finalBackups).toHaveLength(3);
+  });
+});
+
+describe('Workflow 5: Multi-turn lifecycle split', () => {
+  let tempRoot = '';
+  let previousCwd = '';
+
+  beforeEach(async () => {
+    tempRoot = await mkdtemp(join(tmpdir(), 'skill-workflow-5-'));
+    previousCwd = cwd();
+    chdir(tempRoot);
+  });
+
+  afterEach(async () => {
+    chdir(previousCwd);
+    await rm(tempRoot, { recursive: true, force: true });
+  });
+
+  it('keeps overlays across agent_end and applies review+cleanup at session_end', async () => {
+    const plugin = buildPlugin(tempRoot, false);
+    const sessionId = 'workflow-5-session';
+    const skillKey = 'skill.workflow.5';
+    const skillFilePath = join('skills', skillKey, 'SKILL.md');
+
+    const firstPrompt = await plugin.before_prompt_build(sessionId, skillKey, 'BASE_PROMPT');
+    expect(firstPrompt).toBe('BASE_PROMPT');
+
+    await plugin.after_tool_call(sessionId, 'shell', 'Error: command failed first', true);
+
+    await plugin.agent_end(sessionId);
+
+    const overlaysAfterAgentEnd = await plugin.overlayStore.listBySession(sessionId);
+    expect(overlaysAfterAgentEnd.length).toBeGreaterThan(0);
+    expect(await pathExists(skillFilePath)).toBe(false);
+
+    const secondPrompt = await plugin.before_prompt_build(sessionId, skillKey, 'BASE_PROMPT');
+    expect(secondPrompt).toContain('--- SKILL OVERLAY (session-local) ---');
+    expect(secondPrompt).toContain('Error excerpt: Error: command failed first');
+
+    await plugin.after_tool_call(sessionId, 'shell', 'Error: command failed second', true);
+
+    await plugin.session_end(sessionId);
+
+    expect(await pathExists(skillFilePath)).toBe(true);
+    const merged = await readFile(skillFilePath, 'utf8');
+    expect(merged).toContain(`--- PATCH: ${skillKey} ---`);
+    expect(merged).toContain('## Proposed Changes');
+
+    const overlaysAfterSessionEnd = await plugin.overlayStore.listBySession(sessionId);
+    expect(overlaysAfterSessionEnd).toHaveLength(0);
   });
 });

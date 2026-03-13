@@ -6,14 +6,15 @@
 - **`before_prompt_build.ts`**: Injects current session overlays into the prompt.
 - **`after_tool_call.ts`**: Captures tool results, errors, and performance signals.
 - **`message_received.ts`**: Identifies user corrections and feedback patterns.
-- **`agent_end.ts`**: Triggers the post-session review subagent.
+- **`agent_end.ts`**: Logs run-level statistics (event count, duration). Does not trigger review.
+- **`session_end.ts`**: Triggers the full review→patch→merge→cleanup pipeline at session end.
 
 ### 2. `src/plugin/overlay/` (Session-Local Storage)
 - **`overlay_store.ts`**: CRUD operations for session-local `.md` files in `.skill-overlays/`.
 - **`overlay_injector.ts`**: Logic for merging overlays into OpenClaw's prompt structure.
 
 ### 3. `src/plugin/feedback/` (Feedback Logic)
-- **`collector.ts`**: Buffers feedback events for review.
+- **`collector.ts`**: Persists feedback events to `.skill-feedback/<sessionId>.jsonl` (JSONL format) and buffers in memory for fast access.
 - **`classifiers.ts`**: Logic for determining if a feedback signal warrants an overlay or permanent change.
 
 ### 4. `src/review/` (Evolution Management)
@@ -97,16 +98,19 @@ export interface PatchMetadata {
 
 ### A. Trigger Conditions (Feedback Identification)
 The plugin must recognize feedback using mixed signals:
-1. **Tool Error**: Direct failure from a tool execution (`onToolError`).
+1. **Tool Error**: Direct failure from a tool execution (`onToolError`). Detected via:
+   - `isError` flag
+   - `rawResult.status === 'error'`
+   - `rawResult.error` field existence
 2. **Explicit Correction**: Regex or heuristic-based detection of user feedback (e.g., "Don't do that", "Use tool X instead").
 3. **Implicit Correction**: Repeating similar tool calls with different parameters after failure.
 
 ### B. Session Overlay Lifecycle
 1. **Creation**: Triggered by high-severity feedback. Saved to `${storageDir}/${sessionId}/${skillKey}.md`.
 2. **Injection**: `before_prompt_build` reads available overlays for the current session and appends them to the prompt.
-3. **Cleanup**: If `clearOnSessionEnd` is true, the `SESSION_ID` directory is deleted after the review subagent completes.
+3. **Cleanup**: If `clearOnSessionEnd` is true, the `SESSION_ID` directory is deleted after the review subagent completes (triggered by `session_end`).
 
-### C. Review & Merge Flow
+### C. Review & Merge Flow (Triggered by `session_end`)
 1. **Evidence Gathering**: Summarize all `FeedbackEvent` objects for the session.
 2. **Subagent Review**: Spawn a subagent with `review_subagent.md` as the system prompt.
 3. **Draft Generation**: Subagent produces a `PATCH.md` containing diffs or updated content.
@@ -119,6 +123,20 @@ The plugin must recognize feedback using mixed signals:
 - Every permanent change triggers a backup of the current `SKILL.md` to `.backups/${skillKey}/v1...v5`.
 - If backups exceed 5, the oldest (v1) is deleted, and others are shifted.
 - Rollback replaces the active `SKILL.md` with the most recent backup.
+
+---
+
+## Plugin Hooks Interface (OpenClaw)
+
+```typescript
+export interface PluginHooks {
+  before_prompt_build(sessionId: string, skillKey: string, currentPrompt: string): Promise<string>;
+  after_tool_call(sessionId: string, toolName: string, output: string, isError: boolean, rawResult?: unknown): Promise<void>;
+  message_received(sessionId: string, message: string): Promise<void>;
+  agent_end(sessionId: string): Promise<void>;
+  session_end(sessionId: string): Promise<void>;
+}
+```
 
 ---
 

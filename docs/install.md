@@ -4,7 +4,7 @@ A plugin that helps OpenClaw skills evolve from real usage feedback.
 
 This repository is an **OpenClaw plugin**, **not** a normal skill folder.
 
-- It uses OpenClaw plugin hooks such as `before_prompt_build`, `after_tool_call`, `message_received`, and `agent_end`.
+- It uses OpenClaw plugin hooks: `before_prompt_build`, `after_tool_call`, `message_received`, `agent_end`, and `session_end`.
 - It is discovered as a plugin through `openclaw.plugin.json` and `package.json -> openclaw.extensions`.
 - Do **not** install it into `skills/` and do **not** expect it to be discovered via `SKILL.md`.
 
@@ -126,6 +126,7 @@ Ask the user:
    * overlays: `.skill-overlays`
    * patches: `.skill-patches`
    * backups: `.skill-backups`
+   * feedback logs: `.skill-feedback`
 
 If the user does not have a specific preference, use the safe default:
 
@@ -230,10 +231,11 @@ Run a small real test:
 
 1. Start a session that uses a skill
 2. Trigger a tool error or give a direct correction
-3. Confirm overlay files appear in:
+3. Confirm overlay files and feedback logs appear:
 
-   * `.skill-overlays/<session-id>/`
-4. End the session
+   * `.skill-overlays/<session-id>/` (overlays)
+   * `.skill-feedback/<session-id>.jsonl` (feedback events)
+4. End the session (triggers `session_end` hook)
 5. Check the result:
 
    * manual merge mode → patch file queued in `.skill-patches/`
@@ -288,10 +290,11 @@ Minimum number of feedback signals before the plugin recommends a skill update.
 ## During a session
 
 * the plugin listens for tool errors and user corrections
+* feedback events are persisted to `.skill-feedback/` for auditability
 * it stores temporary overlay data per session
 * on the next prompt build, it prepends session-local guidance
 
-## At session end
+## At session end (on the `session_end` hook)
 
 * it builds a session summary
 * performs deterministic review
@@ -386,6 +389,7 @@ Check:
 
 * `review.minEvidenceCount`
 * whether enough feedback signals were captured
+* whether the session actually triggered `session_end` (not just `agent_end`)
 * whether the session actually ended cleanly
 
 ## Auto-merge did not happen

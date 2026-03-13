@@ -1,10 +1,23 @@
-import { describe, it, expect } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { FeedbackCollectorImpl } from '../../../src/plugin/feedback/collector.ts';
 import type { FeedbackEvent } from '../../../src/shared/types.ts';
 
 describe('plugin/feedback/collector', () => {
+  let tempDir: string;
+
+  beforeEach(async () => {
+    tempDir = await mkdtemp(join(tmpdir(), 'skill-generation-feedback-'));
+  });
+
+  afterEach(async () => {
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
   it('collects events and returns only events for the requested session', async () => {
-    const collector = new FeedbackCollectorImpl();
+    const collector = new FeedbackCollectorImpl(tempDir);
     const sessionAEvent: FeedbackEvent = {
       sessionId: 's1',
       skillKey: 'skill.a',
@@ -28,7 +41,7 @@ describe('plugin/feedback/collector', () => {
   });
 
   it('returns a copy so caller mutations do not affect stored events', async () => {
-    const collector = new FeedbackCollectorImpl();
+    const collector = new FeedbackCollectorImpl(tempDir);
     const event: FeedbackEvent = {
       sessionId: 's1',
       skillKey: 'skill.a',
@@ -47,7 +60,7 @@ describe('plugin/feedback/collector', () => {
   });
 
   it('returns an empty array for unknown sessions', async () => {
-    const collector = new FeedbackCollectorImpl();
+    const collector = new FeedbackCollectorImpl(tempDir);
     await expect(collector.getSessionFeedback('missing-session')).resolves.toEqual([]);
   });
 });

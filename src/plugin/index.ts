@@ -13,13 +13,16 @@ import type {
   ReviewRunner,
   RollbackManager,
   SkillEvolutionConfig,
-  Logger
+  Logger,
+  ResolvedPaths
 } from '../shared/types.js';
 import { getDefaultConfig } from './config.js';
+import { resolvePaths } from '../shared/paths.js';
 import { after_tool_call } from './hooks/after_tool_call.js';
 import { agent_end } from './hooks/agent_end.js';
 import { before_prompt_build } from './hooks/before_prompt_build.js';
 import { message_received } from './hooks/message_received.js';
+import { session_end } from './hooks/session_end.js';
 import FeedbackClassifierImpl from './feedback/classifiers.js';
 import FeedbackCollectorImpl from './feedback/collector.js';
 import OverlayInjectorImpl from './overlay/overlay_injector.js';
@@ -35,6 +38,8 @@ import { ConsoleLogger } from '../shared/logger.js';
  */
 export class SkillEvolutionPlugin implements PluginHooks {
   public readonly config: SkillEvolutionConfig;
+
+  public readonly paths: ResolvedPaths;
 
   public readonly logger: Logger;
 
@@ -61,17 +66,23 @@ export class SkillEvolutionPlugin implements PluginHooks {
   /**
    * Initializes plugin dependencies with defaults for v1 skeleton.
    */
-  public constructor(config: SkillEvolutionConfig = getDefaultConfig()) {
+  public constructor(config: SkillEvolutionConfig = getDefaultConfig(), workspaceDir?: string) {
     this.config = config;
+    this.paths = resolvePaths(workspaceDir ?? process.cwd(), this.config);
     this.logger = new ConsoleLogger('plugin.index');
-    this.overlayStore = new OverlayStoreImpl(this.config.sessionOverlay.storageDir);
+    this.overlayStore = new OverlayStoreImpl(this.paths.overlaysDir);
     this.overlayInjector = new OverlayInjectorImpl();
-    this.feedbackCollector = new FeedbackCollectorImpl();
+    this.feedbackCollector = new FeedbackCollectorImpl(this.paths.feedbackDir);
     this.feedbackClassifier = new FeedbackClassifierImpl();
-    this.reviewRunner = new ReviewRunnerImpl();
+    this.reviewRunner = new ReviewRunnerImpl(this.config);
     this.patchGenerator = new PatchGeneratorImpl();
-    this.mergeManager = new MergeManagerImpl();
-    this.rollbackManager = new RollbackManagerImpl();
+    this.rollbackManager = new RollbackManagerImpl(this.config, this.paths.backupsDir, this.paths.skillsDir);
+    this.mergeManager = new MergeManagerImpl(
+      this.config,
+      this.rollbackManager,
+      this.paths.skillsDir,
+      this.paths.patchesDir
+    );
     this.sessionSkillKeys = new Map<string, string>();
     this.sessionStartedAt = new Map<string, number>();
   }
@@ -86,8 +97,14 @@ export class SkillEvolutionPlugin implements PluginHooks {
   /**
    * Runs post-tool-call hook.
    */
-  public async after_tool_call(sessionId: string, toolName: string, output: string, isError: boolean): Promise<void> {
-    return after_tool_call(this, sessionId, toolName, output, isError);
+  public async after_tool_call(
+    sessionId: string,
+    toolName: string,
+    output: string,
+    isError: boolean,
+    rawResult?: unknown
+  ): Promise<void> {
+    return after_tool_call(this, sessionId, toolName, output, isError, rawResult);
   }
 
   /**
@@ -102,6 +119,10 @@ export class SkillEvolutionPlugin implements PluginHooks {
    */
   public async agent_end(sessionId: string): Promise<void> {
     return agent_end(this, sessionId);
+  }
+
+  public async session_end(sessionId: string): Promise<void> {
+    return session_end(this, sessionId);
   }
 
   public ensureSessionStarted(sessionId: string): void {

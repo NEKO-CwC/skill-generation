@@ -5,19 +5,37 @@
 import type { FeedbackEvent, OverlayEntry } from '../../shared/types.js';
 import type { SkillEvolutionPlugin } from '../index.js';
 
-/**
- * Handles post-tool-call feedback collection.
- */
+function isToolError(isError: boolean, _output: string, rawResult?: unknown): boolean {
+  if (isError) {
+    return true;
+  }
+
+  if (rawResult && typeof rawResult === 'object') {
+    const record = rawResult as Record<string, unknown>;
+    if (record.status === 'error') {
+      return true;
+    }
+
+    if ('error' in record && record.error !== undefined && record.error !== null && record.error !== '') {
+      return true;
+    }
+  }
+
+  return false;
+}
+
 export async function after_tool_call(
   plugin: SkillEvolutionPlugin,
   sessionId: string,
   toolName: string,
   output: string,
-  isError: boolean
+  isError: boolean,
+  rawResult?: unknown
 ): Promise<void> {
   plugin.ensureSessionStarted(sessionId);
   const skillKey = plugin.getSessionSkillKey(sessionId);
-  const eventType = plugin.feedbackClassifier.classify(output, isError);
+  const detectedError = isToolError(isError, output, rawResult);
+  const eventType = plugin.feedbackClassifier.classify(output, detectedError);
 
   if (eventType === null) {
     return;
@@ -35,7 +53,7 @@ export async function after_tool_call(
   };
   await plugin.feedbackCollector.collect(event);
 
-  if (!isError || !plugin.config.triggers.onToolError || !plugin.config.sessionOverlay.enabled) {
+  if (!detectedError || !plugin.config.triggers.onToolError || !plugin.config.sessionOverlay.enabled) {
     return;
   }
 

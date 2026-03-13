@@ -78,6 +78,7 @@ openclaw plugins doctor
 ## 核心能力
 
 * 收集工具失败、用户纠正、正向反馈
+* 反馈事件持久化到 .skill-feedback/ 目录，重启后可审计
 * 生成 session-local overlay
 * 在 session 结束时执行 deterministic review
 * 生成 patch，并支持 manual / auto merge

@@ -46,7 +46,7 @@ The system is designed with strictly one-directional dependencies to prevent cir
 1. Hooks depend on Injector, Collector, and Store.
 2. Injector depends on Store.
 3. Collector depends on Classifier.
-4. ReviewRunner depends on Store and Collector (to summarize the session).
+4. ReviewRunner depends on Store and Collector (to summarize the session). Collector persists events to `.skill-feedback/` on disk.
 5. PatchGenerator depends on ReviewRunner output.
 6. MergeManager depends on PatchGenerator output.
 7. RollbackManager operates independently but is invoked by MergeManager or CLI.
@@ -63,13 +63,14 @@ The lifecycle of skill evolution follows a strict 5-step workflow:
    - Hooks `after_tool_call` and `message_received` trigger.
    - `FeedbackCollector` captures errors, corrections, and successes.
    - `FeedbackClassifier` evaluates severity and categorizes the event.
-3. **Overlay Generation (Session-Local)**:
+3. **Feedback Persistence**:
+   - Events are persisted to `.skill-feedback/<sessionId>.jsonl` as JSONL. This survives gateway restarts.
+4. **Overlay Generation (Session-Local)**:
    - If feedback dictates a tactical adjustment, an overlay is generated and saved to `OverlayStore`.
    - **Invariant:** The global `SKILL.md` is NOT modified.
 4. **Session-End Review**:
-   - Hook `agent_end` triggers.
-   - `ReviewRunner` aggregates all session feedback and overlays.
-   - `PatchGenerator` creates a formal diff/patch from the review findings.
+   - `agent_end` fires per-turn: logs run-level stats only (duration, event count). Does NOT trigger review or clear session state.
+   - `session_end` fires once at session end: aggregates all session feedback and overlays, triggers ReviewRunner, PatchGenerator, MergeManager, and clears overlays/session state.
 5. **Merge & Rollback**:
    - `MergeManager` evaluates the patch against the merge policy (`requireHumanMerge`).
    - If auto-merge is permitted, `RollbackManager` creates a backup.
@@ -84,7 +85,8 @@ The plugin operates on a session-scoped state machine, handling normal flows and
 | `INIT`           | Session starts             | `COLLECTING`     | Load existing overlays into context. |
 | `COLLECTING`     | Significant feedback event | `OVERLAY_ACTIVE` | Classify event, generate & store local overlay. |
 | `OVERLAY_ACTIVE` | Agent requires prompt      | `OVERLAY_ACTIVE` | Inject overlay into prompt. Continue collecting. |
-| `COLLECTING` / `OVERLAY_ACTIVE` | Session ends (`agent_end`) | `REVIEWING`      | Aggregate feedback and overlays; begin review. |
+| `COLLECTING` / `OVERLAY_ACTIVE` | `agent_end`                | `COLLECTING` / `OVERLAY_ACTIVE` | Logs run-level stats only. No state transition. |
+| `COLLECTING` / `OVERLAY_ACTIVE` | `session_end`              | `REVIEWING`      | Aggregate feedback and overlays; begin review. |
 | `REVIEWING`      | Review completes           | `MERGING`        | Generate patch from review. |
 | `REVIEWING`      | Review fails               | `ERROR`          | Throw `ReviewFailedError`, log state. |
 | `MERGING`        | Merge policy allows        | `CLOSED`         | Create backup, apply patch to `SKILL.md`. |
@@ -212,8 +214,9 @@ export interface PluginHooks {
    * @param toolName The name of the tool executed.
    * @param output The raw output or error string.
    * @param isError Whether the tool execution threw an error.
+   * @param rawResult The raw result object from the tool execution.
    */
-  after_tool_call(sessionId: string, toolName: string, output: string, isError: boolean): Promise<void>;
+  after_tool_call(sessionId: string, toolName: string, output: string, isError: boolean, rawResult?: unknown): Promise<void>;
 
   /**
    * Called when a user message is received to detect corrections or clarifications.
@@ -223,10 +226,16 @@ export interface PluginHooks {
   message_received(sessionId: string, message: string): Promise<void>;
 
   /**
-   * Called when the session terminates to trigger the review and patch generation workflow.
+   * Logs run-level statistics. Does NOT trigger review.
    * @param sessionId The current session ID.
    */
   agent_end(sessionId: string): Promise<void>;
+
+  /**
+   * Triggers the review and patch generation workflow when the session terminates.
+   * @param sessionId The current session ID.
+   */
+  session_end(sessionId: string): Promise<void>;
 }
 
 /** 
@@ -263,6 +272,7 @@ export interface OverlayInjector {
 
 /**
  * Collects and manages feedback signals during a session.
+ * Persists feedback events to JSONL files on disk.
  */
 export interface FeedbackCollector {
   /** Stores a new feedback event. */
@@ -351,7 +361,8 @@ This table maps the repository structure to the interfaces defined in this archi
 | Source File | Interfaces / Responsibilities Implemented |
 |-------------|-------------------------------------------|
 | `src/plugin/index.ts` | Plugin lifecycle orchestration |
-| `src/plugin/hooks/*.ts` | `PluginHooks` |
+| `src/plugin/hooks/agent_end.ts` | Run-level stats logging (no review, no cleanup) |
+| `src/plugin/hooks/session_end.ts` | Full review→patch→merge→cleanup pipeline |
 | `src/plugin/overlay/overlay_store.ts` | `OverlayStore` |
 | `src/plugin/overlay/overlay_injector.ts` | `OverlayInjector` |
 | `src/plugin/feedback/collector.ts` | `FeedbackCollector` |
@@ -362,3 +373,4 @@ This table maps the repository structure to the interfaces defined in this archi
 | `src/review/merge_manager.ts` | `MergeManager` |
 | `src/review/rollback_manager.ts` | `RollbackManager` |
 | `src/shared/types.ts` | `FeedbackEvent`, `PatchMetadata`, `OverlayEntry`, etc. |
+| `src/shared/paths.ts` | Unified workspace-relative path resolution |
