@@ -360,17 +360,63 @@ This table maps the repository structure to the interfaces defined in this archi
 
 | Source File | Interfaces / Responsibilities Implemented |
 |-------------|-------------------------------------------|
-| `src/plugin/index.ts` | Plugin lifecycle orchestration |
+| `src/openclaw.ts` | OpenClaw adapter: unified `resolveSessionId()`, runtime workspace capture via `captureWorkspaceDir()` |
+| `src/plugin/index.ts` | Plugin lifecycle orchestration, `ensureWorkspaceDir()` late binding |
 | `src/plugin/hooks/agent_end.ts` | Run-level stats logging (no review, no cleanup) |
 | `src/plugin/hooks/session_end.ts` | Full review→patch→merge→cleanup pipeline |
 | `src/plugin/overlay/overlay_store.ts` | `OverlayStore` |
 | `src/plugin/overlay/overlay_injector.ts` | `OverlayInjector` |
 | `src/plugin/feedback/collector.ts` | `FeedbackCollector` |
-| `src/plugin/feedback/classifiers.ts` | `FeedbackClassifier` |
+| `src/plugin/feedback/classifiers.ts` | `FeedbackClassifier` (English + Chinese patterns) |
 | `src/plugin/config.ts` | `SkillEvolutionConfig` |
-| `src/review/review_runner.ts` | `ReviewRunner` |
+| `src/review/review_runner.ts` | `ReviewRunner` (considers errors + corrections + overlays) |
 | `src/review/patch_generator.ts` | `PatchGenerator` |
 | `src/review/merge_manager.ts` | `MergeManager` |
 | `src/review/rollback_manager.ts` | `RollbackManager` |
 | `src/shared/types.ts` | `FeedbackEvent`, `PatchMetadata`, `OverlayEntry`, etc. |
-| `src/shared/paths.ts` | Unified workspace-relative path resolution |
+| `src/shared/paths.ts` | Unified workspace-relative path resolution (optional `skillsDir` override) |
+
+## 7. Session ID Resolution Contract
+
+All hooks use a unified `resolveSessionId()` function (defined in `src/openclaw.ts`) to derive the session identifier from OpenClaw hook context objects. This ensures that feedback, overlays, and review data are consistently keyed to the same session regardless of which context fields OpenClaw provides.
+
+**Priority chain** (first non-empty string wins):
+1. `ctx.sessionId`
+2. `ctx.sessionKey`
+3. `ctx.conversationId`
+4. `ctx.channelId`
+5. `'unknown-session'` (fallback)
+
+This resolution is applied identically to all five hooks (`before_prompt_build`, `after_tool_call`, `message_received`, `agent_end`, `session_end`). No hook uses a different strategy.
+
+## 8. Workspace Late-Binding
+
+The plugin does **not** read `workspaceDir` from the plugin config schema. Instead, workspace directory is resolved at runtime from OpenClaw hook context:
+
+1. **Initialization**: Plugin starts with `process.cwd()` as the workspace directory.
+2. **First hook invocation**: `captureWorkspaceDir()` checks each hook context for `ctx.workspaceDir`. If present, it calls `plugin.ensureWorkspaceDir(workspaceDir)`.
+3. **Binding**: `ensureWorkspaceDir()` is idempotent — once bound, subsequent calls are no-ops. On first bind, it reconstructs all path-dependent modules (`OverlayStore`, `FeedbackCollector`, `RollbackManager`, `MergeManager`) with workspace-relative paths.
+4. **Rationale**: OpenClaw determines the actual workspace at runtime; hardcoding it in config would create a mismatch when the plugin is used across different projects.
+
+## 9. Feedback Classification & Severity
+
+### Classification
+`FeedbackClassifierImpl` uses regex-based pattern matching for both English and Chinese:
+
+| Event Type | English Patterns | Chinese Patterns |
+|------------|-----------------|-----------------|
+| `user_correction` | `don't`, `wrong`, `incorrect`, `instead`, `not that`, `should have`, `fix this` | `不对`, `错了`, `应该`, `改成`, `不是这个`, `上一句有问题`, `你这里理解错了` |
+| `positive_feedback` | `good`, `great`, `perfect`, `thanks`, `correct`, `nice` | `这样可以`, `对的`, `很好`, `没问题`, `谢谢`, `这个版本可以` |
+| `tool_error` | N/A (determined by `isError` flag + structural checks + string heuristic) | N/A |
+
+### Tool Error Detection (String Heuristic)
+In addition to the `isError` flag and structured `rawResult` checks, `after_tool_call` also applies a string-based heuristic on the output text: `/\b(error|failed|unauthorized|timeout|missing api key)\b/i`.
+
+### Severity Assessment
+Severity counts **both** `tool_error` and `user_correction` events:
+
+| Condition | Severity |
+|-----------|----------|
+| 0 errors + 0 corrections | `low` |
+| ≥2 corrections OR ≥3 errors | `high` |
+| All other combinations (≥1 signal) | `medium` |

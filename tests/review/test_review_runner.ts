@@ -2,13 +2,13 @@ import { describe, expect, it } from 'vitest';
 import { ReviewRunnerImpl } from '../../src/review/review_runner.ts';
 import { ReviewFailedError } from '../../src/shared/errors.ts';
 import { getDefaultConfig } from '../../src/plugin/config.ts';
-import type { SessionSummary } from '../../src/shared/types.ts';
+import type { FeedbackEvent, SessionSummary } from '../../src/shared/types.ts';
 
 describe('review/review_runner', () => {
-  const baseSummary = (totalErrors: number, overlaysCount: number): SessionSummary => ({
+  const baseSummary = (totalErrors: number, overlaysCount: number, events: FeedbackEvent[] = []): SessionSummary => ({
     sessionId: 'session-1',
     skillKey: 'skill.alpha',
-    events: [],
+    events,
     overlays: Array.from({ length: overlaysCount }, (_, idx) => ({
       sessionId: 'session-1',
       skillKey: 'skill.alpha',
@@ -21,19 +21,33 @@ describe('review/review_runner', () => {
     totalErrors
   });
 
-  it('uses low risk for 0 and 1 errors', async () => {
+  const correctionEvent = (idx: number): FeedbackEvent => ({
+    sessionId: 'session-1',
+    skillKey: 'skill.alpha',
+    timestamp: idx,
+    eventType: 'user_correction',
+    severity: 'medium'
+  });
+
+  it('uses low risk for 0 and 1 total signals (errors + corrections)', async () => {
     const runner = new ReviewRunnerImpl();
     await expect(runner.runReview(baseSummary(0, 0))).resolves.toMatchObject({ riskLevel: 'low' });
     await expect(runner.runReview(baseSummary(1, 0))).resolves.toMatchObject({ riskLevel: 'low' });
+    await expect(
+      runner.runReview(baseSummary(0, 0, [correctionEvent(1)]))
+    ).resolves.toMatchObject({ riskLevel: 'low' });
   });
 
-  it('uses medium risk for 2 and 3 errors', async () => {
+  it('uses medium risk for 2-3 total signals', async () => {
     const runner = new ReviewRunnerImpl();
     await expect(runner.runReview(baseSummary(2, 0))).resolves.toMatchObject({ riskLevel: 'medium' });
     await expect(runner.runReview(baseSummary(3, 0))).resolves.toMatchObject({ riskLevel: 'medium' });
+    await expect(
+      runner.runReview(baseSummary(1, 0, [correctionEvent(1)]))
+    ).resolves.toMatchObject({ riskLevel: 'medium' });
   });
 
-  it('uses high risk for 4 or more errors', async () => {
+  it('uses high risk for 4 or more total signals', async () => {
     const runner = new ReviewRunnerImpl();
     await expect(runner.runReview(baseSummary(4, 0))).resolves.toMatchObject({ riskLevel: 'high' });
     await expect(runner.runReview(baseSummary(10, 0))).resolves.toMatchObject({ riskLevel: 'high' });
@@ -44,12 +58,19 @@ describe('review/review_runner', () => {
     await expect(runner.runReview(baseSummary(1, 0))).resolves.toMatchObject({ isModificationRecommended: true });
   });
 
+  it('recommends modification when there are corrections but no errors or overlays', async () => {
+    const runner = new ReviewRunnerImpl();
+    await expect(
+      runner.runReview(baseSummary(0, 0, [correctionEvent(1)]))
+    ).resolves.toMatchObject({ isModificationRecommended: true });
+  });
+
   it('recommends modification when there are overlays even with zero errors', async () => {
     const runner = new ReviewRunnerImpl();
     await expect(runner.runReview(baseSummary(0, 1))).resolves.toMatchObject({ isModificationRecommended: true });
   });
 
-  it('does not recommend modification when no errors and no overlays', async () => {
+  it('does not recommend modification when no errors, no corrections, and no overlays', async () => {
     const runner = new ReviewRunnerImpl();
     await expect(runner.runReview(baseSummary(0, 0))).resolves.toMatchObject({ isModificationRecommended: false });
   });
@@ -74,6 +95,13 @@ describe('review/review_runner', () => {
     const runner = new ReviewRunnerImpl();
     const result = await runner.runReview(baseSummary(0, 2));
     expect(result.proposedDiff).toBe('overlay-1\n\noverlay-2');
+  });
+
+  it('includes correction and positive counts in justification', async () => {
+    const runner = new ReviewRunnerImpl();
+    const result = await runner.runReview(baseSummary(1, 0, [correctionEvent(1)]));
+    expect(result.justification).toContain('1 corrections');
+    expect(result.justification).toContain('1 errors');
   });
 
   it('wraps unexpected errors as ReviewFailedError', async () => {

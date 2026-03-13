@@ -78,6 +78,7 @@ openclaw plugins doctor
 ## 核心能力
 
 * 收集工具失败、用户纠正、正向反馈
+* 支持中英文反馈识别（如"错了"、"应该"、"不对" 等中文纠正模式）
 * 反馈事件持久化到 .skill-feedback/ 目录，重启后可审计
 * 生成 session-local overlay
 * 在 session 结束时执行 deterministic review

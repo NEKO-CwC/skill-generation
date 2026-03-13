@@ -99,25 +99,50 @@ export interface PatchMetadata {
 ### A. Trigger Conditions (Feedback Identification)
 The plugin must recognize feedback using mixed signals:
 1. **Tool Error**: Direct failure from a tool execution (`onToolError`). Detected via:
-   - `isError` flag
-   - `rawResult.status === 'error'`
-   - `rawResult.error` field existence
-2. **Explicit Correction**: Regex or heuristic-based detection of user feedback (e.g., "Don't do that", "Use tool X instead").
-3. **Implicit Correction**: Repeating similar tool calls with different parameters after failure.
+   - `isError` flag from the hook caller
+   - `rawResult.status === 'error'` (structured error object)
+   - `rawResult.error` field existence (non-null, non-empty)
+   - **String-based heuristic**: output text matching `/\b(error|failed|unauthorized|timeout|missing api key)\b/i`
+2. **Explicit Correction (English)**: Regex-based detection of user correction patterns:
+   - Matches: `don't`, `wrong`, `incorrect`, `instead`, `not that`, `should have`, `fix this`
+3. **Explicit Correction (Chinese)**: Regex-based detection of Chinese correction patterns:
+   - Matches: `不对`, `错了`, `应该`, `改成`, `不是这个`, `上一句有问题`, `你这里理解错了`
+4. **Positive Feedback (English)**: `good`, `great`, `perfect`, `thanks`, `correct`, `nice`
+5. **Positive Feedback (Chinese)**: `这样可以`, `对的`, `很好`, `没问题`, `谢谢`, `这个版本可以`
+6. **Implicit Correction**: Repeating similar tool calls with different parameters after failure.
+
+### A.1 Severity Assessment
+Severity is assessed by counting **both** `tool_error` and `user_correction` events:
+
+| Condition | Severity |
+|-----------|----------|
+| 0 errors + 0 corrections | `low` |
+| ≥2 corrections OR ≥3 errors | `high` |
+| All other combinations (≥1 signal) | `medium` |
 
 ### B. Session Overlay Lifecycle
-1. **Creation**: Triggered by high-severity feedback. Saved to `${storageDir}/${sessionId}/${skillKey}.md`.
-2. **Injection**: `before_prompt_build` reads available overlays for the current session and appends them to the prompt.
-3. **Cleanup**: If `clearOnSessionEnd` is true, the `SESSION_ID` directory is deleted after the review subagent completes (triggered by `session_end`).
+1. **Creation from tool errors**: Triggered by detected tool errors (via `after_tool_call`) when `triggers.onToolError` is enabled.
+2. **Creation from user corrections**: Triggered on the **first** `user_correction` event in a session (via `message_received`) regardless of severity level, when `triggers.onUserCorrection` is enabled. No minimum severity threshold required.
+3. **Update on subsequent corrections**: If an overlay already exists for the session/skill, subsequent user corrections **append** to the existing overlay content rather than creating a new one.
+4. **Injection**: `before_prompt_build` reads available overlays for the current session and returns `{ prependSystemContext }` for OpenClaw to prepend to the prompt.
+5. **Cleanup**: If `clearOnSessionEnd` is true, the session overlay directory is deleted after the review pipeline completes (triggered by `session_end`).
 
 ### C. Review & Merge Flow (Triggered by `session_end`)
-1. **Evidence Gathering**: Summarize all `FeedbackEvent` objects for the session.
-2. **Subagent Review**: Spawn a subagent with `review_subagent.md` as the system prompt.
-3. **Draft Generation**: Subagent produces a `PATCH.md` containing diffs or updated content.
-4. **Merge Decision**:
-    - If `requireHumanMerge` is true: Notify user and wait for approval.
-    - If `requireHumanMerge` is false: Apply patch.
-5. **Finalization**: Update the skill file, save a backup of the previous version, and log to `patch_history.json`.
+1. **Evidence Gathering**: Summarize all `FeedbackEvent` objects for the session, including error count, correction count, positive feedback count, and overlay count.
+2. **Recommendation Decision**: Modification is recommended if ANY of the following is true:
+   - `totalErrors > 0`
+   - `correctionCount > 0` (user corrections alone are sufficient to trigger review)
+   - `overlayCount > 0`
+3. **Risk Assessment**: Risk level is based on combined `totalErrors + correctionCount`:
+   - `combined ≤ 1` → `low`
+   - `combined ≤ 3` → `medium`
+   - `combined > 3` → `high`
+4. **Justification**: Includes error count, correction count, positive signal count, and overlay count.
+5. **Draft Generation**: Produces a text-format patch from accumulated overlay content.
+6. **Merge Decision**:
+    - If `requireHumanMerge` is true: Queue patch to `.skill-patches/` for human review.
+    - If `requireHumanMerge` is false: Apply patch automatically.
+7. **Finalization**: Update the skill file, save a backup of the previous version, prune rollback chain to cap.
 
 ### D. Rollback Management (Cap at 5)
 - Every permanent change triggers a backup of the current `SKILL.md` to `.backups/${skillKey}/v1...v5`.

@@ -45,16 +45,24 @@ export async function message_received(plugin: SkillEvolutionPlugin, sessionId: 
     return;
   }
 
-  if (eventType === 'user_correction' && (severity === 'medium' || severity === 'high')) {
-    const overlayEntry: OverlayEntry = {
-      sessionId,
-      skillKey,
-      content: `User correction received. Apply corrected behavior in this session.\nCorrection excerpt: ${message.slice(0, 400)}`,
-      createdAt: Date.now(),
-      updatedAt: Date.now(),
-      reasoning: `Generated from onUserCorrection trigger with ${severity} severity.`
-    };
-    await plugin.overlayStore.create(overlayEntry);
+  if (eventType === 'user_correction') {
+    const existing = await plugin.overlayStore.read(sessionId, skillKey);
+    if (existing) {
+      await plugin.overlayStore.update(sessionId, skillKey, {
+        content: existing.content + `\nAdditional correction: ${message.slice(0, 400)}`,
+        updatedAt: Date.now()
+      });
+    } else {
+      const overlayEntry: OverlayEntry = {
+        sessionId,
+        skillKey,
+        content: `User correction received. Apply corrected behavior in this session.\nCorrection excerpt: ${message.slice(0, 400)}`,
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+        reasoning: `Generated from onUserCorrection trigger with ${severity} severity.`
+      };
+      await plugin.overlayStore.create(overlayEntry);
+    }
   }
 }
 

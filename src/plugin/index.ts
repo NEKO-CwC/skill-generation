@@ -39,15 +39,15 @@ import { ConsoleLogger } from '../shared/logger.js';
 export class SkillEvolutionPlugin implements PluginHooks {
   public readonly config: SkillEvolutionConfig;
 
-  public readonly paths: ResolvedPaths;
+  public paths: ResolvedPaths;
 
   public readonly logger: Logger;
 
-  public readonly overlayStore: OverlayStore;
+  public overlayStore: OverlayStore;
 
   public readonly overlayInjector: OverlayInjector;
 
-  public readonly feedbackCollector: FeedbackCollector;
+  public feedbackCollector: FeedbackCollector;
 
   public readonly feedbackClassifier: FeedbackClassifier;
 
@@ -55,13 +55,15 @@ export class SkillEvolutionPlugin implements PluginHooks {
 
   public readonly patchGenerator: PatchGenerator;
 
-  public readonly mergeManager: MergeManager;
+  public mergeManager: MergeManager;
 
-  public readonly rollbackManager: RollbackManager;
+  public rollbackManager: RollbackManager;
 
   private readonly sessionSkillKeys: Map<string, string>;
 
   private readonly sessionStartedAt: Map<string, number>;
+
+  private workspaceBound: boolean;
 
   /**
    * Initializes plugin dependencies with defaults for v1 skeleton.
@@ -69,6 +71,7 @@ export class SkillEvolutionPlugin implements PluginHooks {
   public constructor(config: SkillEvolutionConfig = getDefaultConfig(), workspaceDir?: string) {
     this.config = config;
     this.paths = resolvePaths(workspaceDir ?? process.cwd(), this.config);
+    this.workspaceBound = !!workspaceDir;
     this.logger = new ConsoleLogger('plugin.index');
     this.overlayStore = new OverlayStoreImpl(this.paths.overlaysDir);
     this.overlayInjector = new OverlayInjectorImpl();
@@ -85,6 +88,24 @@ export class SkillEvolutionPlugin implements PluginHooks {
     );
     this.sessionSkillKeys = new Map<string, string>();
     this.sessionStartedAt = new Map<string, number>();
+  }
+
+  public ensureWorkspaceDir(workspaceDir: string): void {
+    if (this.workspaceBound) {
+      return;
+    }
+    this.workspaceBound = true;
+    this.paths = resolvePaths(workspaceDir, this.config);
+    this.overlayStore = new OverlayStoreImpl(this.paths.overlaysDir);
+    this.feedbackCollector = new FeedbackCollectorImpl(this.paths.feedbackDir);
+    this.rollbackManager = new RollbackManagerImpl(this.config, this.paths.backupsDir, this.paths.skillsDir);
+    this.mergeManager = new MergeManagerImpl(
+      this.config,
+      this.rollbackManager,
+      this.paths.skillsDir,
+      this.paths.patchesDir
+    );
+    this.logger.info('Workspace bound from runtime context', { workspaceDir });
   }
 
   /**

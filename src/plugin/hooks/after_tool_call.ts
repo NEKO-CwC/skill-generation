@@ -5,7 +5,7 @@
 import type { FeedbackEvent, OverlayEntry } from '../../shared/types.js';
 import type { SkillEvolutionPlugin } from '../index.js';
 
-function isToolError(isError: boolean, _output: string, rawResult?: unknown): boolean {
+function isToolError(isError: boolean, output: string, rawResult?: unknown): boolean {
   if (isError) {
     return true;
   }
@@ -19,6 +19,10 @@ function isToolError(isError: boolean, _output: string, rawResult?: unknown): bo
     if ('error' in record && record.error !== undefined && record.error !== null && record.error !== '') {
       return true;
     }
+  }
+
+  if (output && /\b(error|failed|unauthorized|timeout|missing api key)\b/i.test(output)) {
+    return true;
   }
 
   return false;

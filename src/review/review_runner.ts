@@ -51,16 +51,18 @@ export class ReviewRunnerImpl implements ReviewRunner {
   public async runReview(summary: SessionSummary): Promise<ReviewResult> {
     try {
       const overlayCount = summary.overlays.length;
-      const shouldRecommend = summary.totalErrors > 0 || overlayCount > 0;
+      const correctionCount = summary.events.filter((e) => e.eventType === 'user_correction').length;
+      const positiveCount = summary.events.filter((e) => e.eventType === 'positive_feedback').length;
+      const shouldRecommend = summary.totalErrors > 0 || correctionCount > 0 || overlayCount > 0;
 
-      const riskLevel = this.getRiskLevel(summary.totalErrors);
+      const riskLevel = this.getRiskLevel(summary.totalErrors, correctionCount);
       const proposedDiff = summary.overlays.map((entry) => entry.content).join('\n\n');
       const mergeMode = this.config.merge.requireHumanMerge ? 'manual' : 'auto';
       const patchId = `patch_${Date.now()}`;
 
       const result: ReviewResult = {
         isModificationRecommended: shouldRecommend,
-        justification: `Session had ${summary.totalErrors} errors and ${overlayCount} overlays. Recommending skill update.`,
+        justification: `Session had ${summary.totalErrors} errors, ${correctionCount} corrections, ${positiveCount} positive signals, and ${overlayCount} overlays.`,
         proposedDiff,
         riskLevel,
         metadata: {
@@ -89,11 +91,12 @@ export class ReviewRunnerImpl implements ReviewRunner {
     }
   }
 
-  private getRiskLevel(totalErrors: number): 'low' | 'medium' | 'high' {
-    if (totalErrors <= 1) {
+  private getRiskLevel(totalErrors: number, correctionCount: number): 'low' | 'medium' | 'high' {
+    const combined = totalErrors + correctionCount;
+    if (combined <= 1) {
       return 'low';
     }
-    if (totalErrors <= 3) {
+    if (combined <= 3) {
       return 'medium';
     }
     return 'high';

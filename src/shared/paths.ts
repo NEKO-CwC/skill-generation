@@ -5,7 +5,7 @@ export type { ResolvedPaths };
 
 export function resolvePaths(
   workspaceDir: string,
-  config: { sessionOverlay: { storageDir: string } }
+  config: { sessionOverlay: { storageDir: string }; skillsDir?: string }
 ): ResolvedPaths {
   const rel = (pathValue: string): string => (isAbsolute(pathValue) ? pathValue : resolve(workspaceDir, pathValue));
   return {
@@ -13,7 +13,7 @@ export function resolvePaths(
     overlaysDir: rel(config.sessionOverlay.storageDir),
     patchesDir: rel('.skill-patches'),
     backupsDir: rel('.skill-backups'),
-    skillsDir: rel('skills'),
+    skillsDir: rel(config.skillsDir ?? 'skills'),
     feedbackDir: rel('.skill-feedback')
   };
 }
