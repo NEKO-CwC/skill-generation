@@ -1,22 +1,45 @@
+# ─────────────────────────────────────────────────────────────────
+# Example 1: Inherit mode (use current agent's auth)
+#
+# The plugin inherits the running agent's auth profile for LLM
+# review. If auth cannot be resolved, it falls back to
+# deterministic review automatically.
+# ─────────────────────────────────────────────────────────────────
 skillEvolution:
   enabled: true
+  review:
+    engine: llm
+    minEvidenceCount: 2
+  llm:
+    mode: inherit-or-fallback
+    provider: anthropic
   merge:
     requireHumanMerge: true
     maxRollbackVersions: 5
-  sessionOverlay:
-    enabled: true
-    storageDir: ".skill-overlays"
-    injectMode: "system-context"
-    clearOnSessionEnd: true
-  triggers:
-    onToolError: true
-    onUserCorrection: true
-    onSessionEndReview: true
-    onPositiveFeedback: true
-  llm:
-    inheritPrimaryConfig: true
-    modelOverride: null
-    thinkingOverride: null
-  review:
-    minEvidenceCount: 2
-    allowAutoMergeOnLowRiskOnly: false
+  queue:
+    pollIntervalMs: 30000
+
+# ─────────────────────────────────────────────────────────────────
+# Example 2: Explicit SecretRef mode
+#
+# Provide an API key directly via environment variable. No
+# inheritance from the agent, no gateway fallback. If the env
+# var is missing, falls back to deterministic review.
+#
+# Uncomment the block below and comment out Example 1 to use.
+# ─────────────────────────────────────────────────────────────────
+# skillEvolution:
+#   enabled: true
+#   review:
+#     engine: llm
+#     minEvidenceCount: 2
+#   llm:
+#     mode: explicit
+#     provider: anthropic
+#     keyRef:
+#       source: env
+#       id: ANTHROPIC_API_KEY
+#   merge:
+#     requireHumanMerge: true
+#   queue:
+#     pollIntervalMs: 30000

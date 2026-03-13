@@ -15,6 +15,7 @@ import type {
   PluginHookAgentContext,
   PluginHookMessageContext,
   PluginHookToolContext,
+  PluginService,
   SessionEndHandler
 } from '../../src/shared/types.ts';
 import { SkillEvolutionPlugin } from '../../src/plugin/index.ts';
@@ -52,6 +53,10 @@ class MockOpenClawApi implements OpenClawPluginApi {
 
   public on<K extends HookName>(hookName: K, handler: HookHandlerMap[K], opts?: HookOptions): void {
     this.hooks.push({ name: hookName, handler, opts } as RegisteredHook);
+  }
+
+  public registerService(_service: PluginService): void {
+    // no-op for tests
   }
 }
 

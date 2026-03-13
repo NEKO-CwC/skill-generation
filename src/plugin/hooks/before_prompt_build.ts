@@ -4,9 +4,6 @@
 
 import type { SkillEvolutionPlugin } from '../index.js';
 
-/**
- * Handles pre-prompt mutation hook.
- */
 export async function before_prompt_build(
   plugin: SkillEvolutionPlugin,
   sessionId: string,
@@ -25,6 +22,15 @@ export async function before_prompt_build(
 
   for (const overlay of overlays) {
     nextPrompt = plugin.overlayInjector.inject(nextPrompt, overlay);
+  }
+
+  const hints = plugin.pendingHintStore.getHints(sessionId);
+  if (hints.length > 0) {
+    const hintLines = hints.map((h) =>
+      `<hint target="${h.target.kind}:${h.target.key}" count="${h.count}">\n${h.instruction}\n</hint>`
+    );
+    const hintBlock = `<skill_evolution_feedback>\n${hintLines.join('\n')}\n</skill_evolution_feedback>\n\n`;
+    nextPrompt = hintBlock + nextPrompt;
   }
 
   return nextPrompt;

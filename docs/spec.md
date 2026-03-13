@@ -18,9 +18,9 @@
 - **`classifiers.ts`**: Logic for determining if a feedback signal warrants an overlay or permanent change.
 
 ### 4. `src/review/` (Evolution Management)
-- **`review_runner.ts`**: Orchestrates spawning the subagent and passing session logs.
-- **`patch_generator.ts`**: Extracts structured skill updates from subagent responses.
-- **`merge_manager.ts`**: Handles writing patches back to skill files and updating history.
+- **`llm_review_runner.ts`**: Orchestrates LLM-based review with deterministic fallback.
+- **`patch_generator.ts`**: Extracts structured skill updates and reports from review results.
+- **`merge_manager.ts`**: Handles writing patches and mergeable documents to target files.
 - **`rollback_manager.ts`**: Manages the rolling 5-version backup system.
 
 ---
@@ -128,28 +128,54 @@ Severity is assessed by counting **both** `tool_error` and `user_correction` eve
 5. **Cleanup**: If `clearOnSessionEnd` is true, the session overlay directory is deleted after the review pipeline completes (triggered by `session_end`).
 
 ### C. Review & Merge Flow (Triggered by `session_end`)
-1. **Evidence Gathering**: Summarize all `FeedbackEvent` objects for the session, including error count, correction count, positive feedback count, and overlay count.
-2. **Recommendation Decision**: Modification is recommended if ANY of the following is true:
-   - `totalErrors > 0`
-   - `correctionCount > 0` (user corrections alone are sufficient to trigger review)
-   - `overlayCount > 0`
-3. **Risk Assessment**: Risk level is based on combined `totalErrors + correctionCount`:
-   - `combined ≤ 1` → `low`
-   - `combined ≤ 3` → `medium`
-   - `combined > 3` → `high`
-4. **Justification**: Includes error count, correction count, positive signal count, and overlay count.
-5. **Draft Generation**: Produces a text-format patch from accumulated overlay content.
-6. **Merge Decision**:
-    - If `requireHumanMerge` is true: Queue patch to `.skill-patches/` for human review.
-    - If `requireHumanMerge` is false: Apply patch automatically.
-7. **Finalization**: Update the skill file, save a backup of the previous version, prune rollback chain to cap.
+1. **Evidence Gathering**: Summarize all `FeedbackEvent` objects for the session, including errors, corrections, and overlays.
+2. **Review Execution**: `LlmReviewRunner` (or `DeterministicReviewRunner` fallback) reviews the session evidence.
+3. **Recommendation Decision**: Modification is recommended if the review finds sufficient evidence for changes.
+4. **Patch Generation**: `PatchGenerator` produces `PatchOutput` with:
+   - **reportPatch**: Detailed audit log of the session (saved to `.skill-patches/`).
+   - **mergeableDocument**: The complete updated document (if any changes were recommended).
+5. **Merge Decision**:
+   - If `requireHumanMerge` is true: The report is saved, and any mergeable document is queued (it is NOT written to the target file).
+   - If `requireHumanMerge` is false: The report is saved, and the mergeable document (if not null) is applied automatically.
+6. **Target-Aware Merge**:
+   - **Skill**: Updates `skills/<key>/SKILL.md`.
+   - **Builtin**: Updates `.skill-global/tools/<key>.md`.
+   - **Global**: Updates `.skill-global/DEFAULT_SKILL.md`.
+   - **Unresolved**: Report saved only; no automatic merge target for the document.
+7. **Finalization**: Update the target file, save a backup of the previous version, prune rollback chain to cap.
 
 ### D. Rollback Management (Cap at 5)
-- Every permanent change triggers a backup of the current `SKILL.md` to `.backups/${skillKey}/v1...v5`.
-- If backups exceed 5, the oldest (v1) is deleted, and others are shifted.
-- Rollback replaces the active `SKILL.md` with the most recent backup.
+- Every permanent change triggers a backup of the target file before modification.
+- Backups are stored in `.skill-backups/<storageKey>/<versionId>.json`.
+- If backups exceed 5, the oldest is deleted, and others are shifted.
+- Rollback replaces the active target file with the most recent backup.
 
 ---
+
+## E. v2 Subsystems
+
+### 1. Error Normalizer
+- **Safe Serialization**: Ensures no circular references or `[object Object]` appear in feedback.
+- **Fingerprinting**: Identifies repeating errors across different session contexts.
+- **Source Attribution**: Tracks if an error came from a shell exit code, a result field, or text patterns in the output.
+
+### 2. Target Resolver
+- **Routing**: Correctly maps tool failures and skill interactions to specific evolution targets.
+- **Storage Keys**: Generates consistent keys for file storage (`skill-name`, `builtin-read`, `global-default`).
+- **Merge Modes**: Defines which targets can receive automatic document updates and which are report-only.
+
+### 3. Noise Filter
+- **Startup Patterns**: Filters out common initialization errors (missing memory files, `AGENTS.md`).
+- **Environment Checks**: Ignores errors related to missing API keys or `node_modules`.
+- **Low-Signal Logic**: Identifies exploratory tool failures (e.g. `read` on non-existent file) that do not represent skill deficiencies.
+
+### 4. Pending Hint Store
+- **Aggregation**: Tracks recurring errors and instructions across turns within a session.
+- **Threshold Promotion**: Only suggests hints for injection after a specific error frequency is reached.
+- **TTL Expiration**: Automatically clears stale hints to prevent cluttering the prompt context.
+
+---
+
 
 ## Plugin Hooks Interface (OpenClaw)
 
@@ -185,9 +211,19 @@ export interface PluginHooks {
 - [ ] No pollution occurs between concurrent sessions.
 
 ### Review & Patching
-- [ ] Subagent generates a valid, non-empty `PATCH.md` based on session evidence.
+- [ ] LLM-based review produces synthesized updates (or falls back to deterministic).
+- [ ] `NO_MODIFICATION` response correctly stops the merge flow.
+- [ ] `PatchGenerator` splits output into report and mergeable document.
 - [ ] `merge_manager` correctly handles the `requireHumanMerge` flag.
-- [ ] Skill files are updated only when intended.
+- [ ] Skill, builtin, and global targets are correctly updated.
+- [ ] `unresolved` targets are treated as report-only and do not attempt to merge.
+
+### v2 Subsystems
+- [ ] Error normalizer prevents `[object Object]` in feedback logs.
+- [ ] Noise filter correctly identifies and ignores startup noise (e.g. `ENOENT` on `.memory`).
+- [ ] Target resolver routes feedback to the correct storage key.
+- [ ] Pending hints are correctly aggregated and promoted based on frequency.
+- [ ] User corrections across different turns aggregate to the same target.
 
 ### Rollback & History
 - [ ] Backups are created *before* every merge.

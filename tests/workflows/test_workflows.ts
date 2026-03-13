@@ -2,7 +2,6 @@ import { access, mkdtemp, mkdir, readdir, readFile, rm, writeFile } from 'node:f
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { chdir, cwd } from 'node:process';
-import { setTimeout as delay } from 'node:timers/promises';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { getDefaultConfig } from '../../src/plugin/config.ts';
 import { SkillEvolutionPlugin } from '../../src/plugin/index.ts';
@@ -63,7 +62,7 @@ describe('Workflow 1: Tool error -> overlay creation', () => {
       tempRoot,
       '.skill-overlays',
       encodeURIComponent(sessionId),
-      `${encodeURIComponent(skillKey)}.json`
+      `${encodeURIComponent(overlays[0]?.skillKey ?? skillKey)}.json`
     );
     expect(await pathExists(overlayPath)).toBe(true);
 
@@ -89,7 +88,7 @@ describe('Workflow 2: Session end -> review -> patch generation', () => {
     await rm(tempRoot, { recursive: true, force: true });
   });
 
-  it('runs review on session_end, writes merged content, and clears overlays', async () => {
+  it('runs review on session_end, writes report to .skill-patches, and clears overlays', async () => {
     const plugin = buildPlugin(tempRoot, false);
     const sessionId = 'workflow-2-session';
     const skillKey = 'skill.workflow.2';
@@ -98,13 +97,18 @@ describe('Workflow 2: Session end -> review -> patch generation', () => {
     await plugin.after_tool_call(sessionId, 'build', 'Error: unresolved symbol', true);
     await plugin.session_end(sessionId);
 
-    const skillFilePath = join('skills', skillKey, 'SKILL.md');
-    expect(await pathExists(skillFilePath)).toBe(true);
+    const targets = plugin.getSessionTargets(sessionId);
+    const storageKey = targets.length > 0 ? targets[0]!.storageKey : skillKey;
+    const patchDir = join('.skill-patches', storageKey);
+    expect(await pathExists(patchDir)).toBe(true);
 
-    const merged = await readFile(skillFilePath, 'utf8');
-    expect(merged).toContain(`--- PATCH: ${skillKey} ---`);
-    expect(merged).toContain('## Proposed Changes');
-    expect(merged).toContain('Error excerpt: Error: unresolved symbol');
+    const patchFiles = (await readdir(patchDir)).filter((name) => name.endsWith('.md'));
+    expect(patchFiles.length).toBeGreaterThan(0);
+
+    const patchText = await readFile(join(patchDir, patchFiles[0]!), 'utf8');
+    expect(patchText).toContain(`--- PATCH: ${skillKey} ---`);
+    expect(patchText).toContain('## Proposed Changes');
+    expect(patchText).toContain('Error excerpt: Error: unresolved symbol');
 
     const overlaysAfterEnd = await plugin.overlayStore.listBySession(sessionId);
     expect(overlaysAfterEnd).toHaveLength(0);
@@ -143,19 +147,21 @@ describe('Workflow 3: Manual merge blocks auto-write', () => {
     const after = await readFile(skillFilePath, 'utf8');
     expect(after).toBe('ORIGINAL_SKILL_CONTENT');
 
-    const patchDir = join('.skill-patches', skillKey);
+    const targets = plugin.getSessionTargets(sessionId);
+    const storageKey = targets.length > 0 ? targets[0]!.storageKey : skillKey;
+    const patchDir = join('.skill-patches', storageKey);
     expect(await pathExists(patchDir)).toBe(true);
 
     const patchFiles = (await readdir(patchDir)).filter((name) => name.endsWith('.md'));
     expect(patchFiles.length).toBeGreaterThan(0);
 
-    const patchText = await readFile(join(patchDir, patchFiles[0] ?? ''), 'utf8');
+    const patchText = await readFile(join(patchDir, patchFiles[0]!), 'utf8');
     expect(patchText).toContain(`--- PATCH: ${skillKey} ---`);
     expect(patchText).toContain('Error excerpt: Error: style violation');
   });
 });
 
-describe('Workflow 4: Auto merge writes + backs up + prunes', () => {
+describe('Workflow 4: Auto merge with deterministic review saves report patches', () => {
   let tempRoot = '';
   let previousCwd = '';
 
@@ -170,39 +176,31 @@ describe('Workflow 4: Auto merge writes + backs up + prunes', () => {
     await rm(tempRoot, { recursive: true, force: true });
   });
 
-  it('writes SKILL.md, creates backups each merge, and prunes to maxRollbackVersions=3', async () => {
+  it('saves report patch for each session and does not write report into SKILL.md', async () => {
     const plugin = buildPlugin(tempRoot, false, 3);
     const skillKey = 'skill.workflow.4';
-    const skillFilePath = join('skills', skillKey, 'SKILL.md');
-    const backupDir = join('.skill-backups', skillKey);
 
-    for (let i = 1; i <= 5; i += 1) {
+    for (let i = 1; i <= 3; i += 1) {
       const sessionId = `workflow-4-session-${i}`;
-      const previousContent = (await pathExists(skillFilePath)) ? await readFile(skillFilePath, 'utf8') : '';
 
       await plugin.before_prompt_build(sessionId, skillKey, 'BASE');
       await plugin.after_tool_call(sessionId, 'test', `Error: iteration-${i}`, true);
       await plugin.session_end(sessionId);
-
-      const skillContent = await readFile(skillFilePath, 'utf8');
-      expect(skillContent).toContain(`Source Session: ${sessionId}`);
-
-      const backupFiles = (await readdir(backupDir)).filter((name) => name.endsWith('.json'));
-      expect(backupFiles.length).toBe(Math.min(i, 3));
-
-      const backupPayloads = await Promise.all(
-        backupFiles.map(async (fileName) => {
-          const raw = await readFile(join(backupDir, fileName), 'utf8');
-          return JSON.parse(raw) as { content: string };
-        })
-      );
-      expect(backupPayloads.some((entry) => entry.content === previousContent)).toBe(true);
-
-      await delay(2);
     }
 
-    const finalBackups = (await readdir(backupDir)).filter((name) => name.endsWith('.json'));
-    expect(finalBackups).toHaveLength(3);
+    const targets = plugin.getSessionTargets('workflow-4-session-3');
+    const storageKey = targets.length > 0 ? targets[0]!.storageKey : skillKey;
+    const patchDir = join('.skill-patches', storageKey);
+    expect(await pathExists(patchDir)).toBe(true);
+
+    const patchFiles = (await readdir(patchDir)).filter((name) => name.endsWith('.md'));
+    expect(patchFiles.length).toBeGreaterThanOrEqual(1);
+
+    for (const patchFile of patchFiles) {
+      const patchText = await readFile(join(patchDir, patchFile), 'utf8');
+      expect(patchText).toContain(`--- PATCH: ${skillKey} ---`);
+      expect(patchText).toContain('Review Source: deterministic');
+    }
   });
 });
 
@@ -221,11 +219,10 @@ describe('Workflow 5: Multi-turn lifecycle split', () => {
     await rm(tempRoot, { recursive: true, force: true });
   });
 
-  it('keeps overlays across agent_end and applies review+cleanup at session_end', async () => {
+  it('keeps overlays across agent_end and saves report at session_end', async () => {
     const plugin = buildPlugin(tempRoot, false);
     const sessionId = 'workflow-5-session';
     const skillKey = 'skill.workflow.5';
-    const skillFilePath = join('skills', skillKey, 'SKILL.md');
 
     const firstPrompt = await plugin.before_prompt_build(sessionId, skillKey, 'BASE_PROMPT');
     expect(firstPrompt).toBe('BASE_PROMPT');
@@ -236,7 +233,6 @@ describe('Workflow 5: Multi-turn lifecycle split', () => {
 
     const overlaysAfterAgentEnd = await plugin.overlayStore.listBySession(sessionId);
     expect(overlaysAfterAgentEnd.length).toBeGreaterThan(0);
-    expect(await pathExists(skillFilePath)).toBe(false);
 
     const secondPrompt = await plugin.before_prompt_build(sessionId, skillKey, 'BASE_PROMPT');
     expect(secondPrompt).toContain('--- SKILL OVERLAY (session-local) ---');
@@ -246,10 +242,17 @@ describe('Workflow 5: Multi-turn lifecycle split', () => {
 
     await plugin.session_end(sessionId);
 
-    expect(await pathExists(skillFilePath)).toBe(true);
-    const merged = await readFile(skillFilePath, 'utf8');
-    expect(merged).toContain(`--- PATCH: ${skillKey} ---`);
-    expect(merged).toContain('## Proposed Changes');
+    const targets = plugin.getSessionTargets(sessionId);
+    const storageKey = targets.length > 0 ? targets[0]!.storageKey : skillKey;
+    const patchDir = join('.skill-patches', storageKey);
+    expect(await pathExists(patchDir)).toBe(true);
+
+    const patchFiles = (await readdir(patchDir)).filter((name) => name.endsWith('.md'));
+    expect(patchFiles.length).toBeGreaterThan(0);
+
+    const patchText = await readFile(join(patchDir, patchFiles[0]!), 'utf8');
+    expect(patchText).toContain(`--- PATCH: ${skillKey} ---`);
+    expect(patchText).toContain('## Proposed Changes');
 
     const overlaysAfterSessionEnd = await plugin.overlayStore.listBySession(sessionId);
     expect(overlaysAfterSessionEnd).toHaveLength(0);

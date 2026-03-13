@@ -5,29 +5,6 @@
 import type { FeedbackEvent, OverlayEntry } from '../../shared/types.js';
 import type { SkillEvolutionPlugin } from '../index.js';
 
-function isToolError(isError: boolean, output: string, rawResult?: unknown): boolean {
-  if (isError) {
-    return true;
-  }
-
-  if (rawResult && typeof rawResult === 'object') {
-    const record = rawResult as Record<string, unknown>;
-    if (record.status === 'error') {
-      return true;
-    }
-
-    if ('error' in record && record.error !== undefined && record.error !== null && record.error !== '') {
-      return true;
-    }
-  }
-
-  if (output && /\b(error|failed|unauthorized|timeout|missing api key)\b/i.test(output)) {
-    return true;
-  }
-
-  return false;
-}
-
 export async function after_tool_call(
   plugin: SkillEvolutionPlugin,
   sessionId: string,
@@ -38,9 +15,28 @@ export async function after_tool_call(
 ): Promise<void> {
   plugin.ensureSessionStarted(sessionId);
   const skillKey = plugin.getSessionSkillKey(sessionId);
-  const detectedError = isToolError(isError, output, rawResult);
-  const eventType = plugin.feedbackClassifier.classify(output, detectedError);
 
+  const normalizedError = plugin.errorNormalizer.normalize(toolName, {
+    result: rawResult,
+    error: isError ? output : undefined
+  });
+
+  const safeOutput = plugin.errorNormalizer.safeStringify(rawResult ?? output);
+  const detectedError = isError || normalizedError !== null;
+
+  const noiseDisposition = detectedError
+    ? plugin.noiseFilter.assess(toolName, safeOutput, normalizedError)
+    : 'normal' as const;
+
+  if (noiseDisposition === 'ignore') {
+    plugin.logger.debug('Noise filtered: ignoring tool event', { sessionId, toolName, noiseDisposition });
+    return;
+  }
+
+  const target = plugin.targetResolver.resolve(toolName, skillKey);
+  plugin.addSessionTarget(sessionId, target);
+
+  const eventType = plugin.feedbackClassifier.classify(safeOutput, detectedError);
   if (eventType === null) {
     return;
   }
@@ -53,9 +49,25 @@ export async function after_tool_call(
     eventType,
     severity: plugin.feedbackClassifier.assessSeverity(priorEvents),
     toolName,
-    messageExcerpt: output.slice(0, 280)
+    messageExcerpt: safeOutput.slice(0, 280),
+    target,
+    normalizedError: normalizedError ?? undefined,
+    noiseDisposition
   };
   await plugin.feedbackCollector.collect(event);
+
+  if (normalizedError && detectedError) {
+    plugin.pendingHintStore.record(
+      target,
+      normalizedError.fingerprint,
+      normalizedError.message,
+      `Avoid prior failure mode for ${toolName}: ${normalizedError.message.slice(0, 200)}`
+    );
+  }
+
+  if (noiseDisposition === 'low-signal') {
+    return;
+  }
 
   if (!detectedError || !plugin.config.triggers.onToolError || !plugin.config.sessionOverlay.enabled) {
     return;
@@ -63,8 +75,8 @@ export async function after_tool_call(
 
   const overlayEntry: OverlayEntry = {
     sessionId,
-    skillKey,
-    content: `Tool error observed for ${toolName}. Avoid prior failure mode.\nError excerpt: ${output.slice(0, 400)}`,
+    skillKey: target.storageKey,
+    content: `Tool error observed for ${toolName}. Avoid prior failure mode.\nError excerpt: ${safeOutput.slice(0, 400)}`,
     createdAt: Date.now(),
     updatedAt: Date.now(),
     reasoning: 'Generated from onToolError trigger after failed tool call.'

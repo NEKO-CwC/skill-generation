@@ -3,6 +3,7 @@ import type {
   AfterToolCallEvent,
   BeforePromptBuildEvent,
   BeforePromptBuildResult,
+  LlmClient,
   MessageReceivedEvent,
   OpenClawPluginApi,
   PluginHookAgentContext,
@@ -14,6 +15,10 @@ import type {
 import { fromOpenClawPluginConfig } from './plugin/config.js';
 import { SkillEvolutionPlugin } from './plugin/index.js';
 import { ConsoleLogger } from './shared/logger.js';
+import { AuthResolverImpl } from './review/auth_resolver.js';
+import { LlmClientImpl } from './review/llm_client_impl.js';
+import { ReviewQueueImpl } from './service/review_queue.js';
+import { ReviewWorkerImpl } from './service/review_worker.js';
 
 const HOOK_PRIORITY = 50;
 
@@ -40,6 +45,15 @@ function captureWorkspaceDir(plugin: SkillEvolutionPlugin, ctx: Record<string, u
 }
 
 /**
+ * Captures agent ID from hook context if available.
+ */
+function captureAgentId(plugin: SkillEvolutionPlugin, ctx: Record<string, unknown>): void {
+  if (typeof ctx.agentId === 'string' && ctx.agentId) {
+    plugin.setAgentId(ctx.agentId);
+  }
+}
+
+/**
  * Registers the Skill Evolution plugin hooks with OpenClaw.
  */
 export default function register(api: OpenClawPluginApi): void {
@@ -56,8 +70,31 @@ export default function register(api: OpenClawPluginApi): void {
     config = undefined;
   }
 
-  const plugin = new SkillEvolutionPlugin(config);
+  // Build LLM client if engine=llm and mode!=disabled
+  let llmClient: LlmClient | undefined;
+  if (config && config.review.engine === 'llm' && config.llm.mode !== 'disabled') {
+    const authResolver = new AuthResolverImpl();
+    llmClient = new LlmClientImpl(config, authResolver);
+  }
+
+  const plugin = new SkillEvolutionPlugin(config, undefined, llmClient);
   logger.info('Skill Evolution plugin registered', { enabled: plugin.config.enabled });
+
+  // Build review queue with resolved paths
+  const reviewQueue = new ReviewQueueImpl(plugin.paths.reviewQueueDir, plugin.paths.reviewQueueFailedDir);
+  plugin.reviewQueue = reviewQueue;
+
+  // Build and register review worker
+  const worker = new ReviewWorkerImpl({
+    queue: reviewQueue,
+    reviewRunner: plugin.reviewRunner,
+    patchGenerator: plugin.patchGenerator,
+    mergeManager: plugin.mergeManager,
+    paths: plugin.paths,
+    config: plugin.config
+  });
+
+  api.registerService(worker);
 
   if (!plugin.config.enabled) {
     logger.info('Plugin is disabled by config, skipping hook registration');
@@ -72,12 +109,13 @@ export default function register(api: OpenClawPluginApi): void {
     ): Promise<BeforePromptBuildResult | undefined> => {
       const ctxRecord = ctx as unknown as Record<string, unknown>;
       captureWorkspaceDir(plugin, ctxRecord);
+      captureAgentId(plugin, ctxRecord);
       const sessionId = resolveSessionId(ctxRecord);
       const eventRecord = event as unknown as Record<string, unknown>;
       const ctxSkillKey = typeof ctxRecord.skillKey === 'string' ? ctxRecord.skillKey : undefined;
       const eventSkillKey = typeof eventRecord.skillKey === 'string' ? eventRecord.skillKey : undefined;
       const knownSkillKey = plugin.getSessionSkillKey(sessionId);
-      const fallbackSkillKey = knownSkillKey === 'unknown-skill' ? 'default-skill' : knownSkillKey;
+      const fallbackSkillKey = knownSkillKey === '' ? 'default-skill' : knownSkillKey;
       const skillKey = ctxSkillKey ?? eventSkillKey ?? fallbackSkillKey;
       const currentPrompt = typeof event.prompt === 'string' ? event.prompt : '';
 
@@ -100,9 +138,10 @@ export default function register(api: OpenClawPluginApi): void {
     async (event: AfterToolCallEvent, ctx: PluginHookToolContext): Promise<void> => {
       const ctxRecord = ctx as unknown as Record<string, unknown>;
       captureWorkspaceDir(plugin, ctxRecord);
+      captureAgentId(plugin, ctxRecord);
       const sessionId = resolveSessionId(ctxRecord);
       const toolName = event.toolName;
-      const output = String(event.result ?? event.error ?? '');
+      const output = plugin.errorNormalizer.safeStringify(event.result ?? event.error ?? '');
       const isError = !!event.error;
 
       await plugin.after_tool_call(sessionId, toolName, output, isError, event.result);
@@ -115,6 +154,7 @@ export default function register(api: OpenClawPluginApi): void {
     async (event: MessageReceivedEvent, ctx: PluginHookMessageContext): Promise<void> => {
       const ctxRecord = ctx as unknown as Record<string, unknown>;
       captureWorkspaceDir(plugin, ctxRecord);
+      captureAgentId(plugin, ctxRecord);
       const sessionId = resolveSessionId(ctxRecord);
       const message = event.content;
 
@@ -128,6 +168,7 @@ export default function register(api: OpenClawPluginApi): void {
     async (_event: AgentEndEvent, ctx: PluginHookAgentContext): Promise<void> => {
       const ctxRecord = ctx as unknown as Record<string, unknown>;
       captureWorkspaceDir(plugin, ctxRecord);
+      captureAgentId(plugin, ctxRecord);
       const sessionId = resolveSessionId(ctxRecord);
       await plugin.agent_end(sessionId);
     },
@@ -139,6 +180,7 @@ export default function register(api: OpenClawPluginApi): void {
     async (_event: SessionEndEvent, ctx: PluginHookAgentContext): Promise<void> => {
       const ctxRecord = ctx as unknown as Record<string, unknown>;
       captureWorkspaceDir(plugin, ctxRecord);
+      captureAgentId(plugin, ctxRecord);
       const sessionId = resolveSessionId(ctxRecord);
       await plugin.session_end(sessionId);
     },

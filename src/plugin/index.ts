@@ -3,16 +3,23 @@
  */
 
 import type {
+  ErrorNormalizer,
+  EvolutionTarget,
   FeedbackClassifier,
   FeedbackCollector,
+  LlmClient,
   MergeManager,
+  NoiseFilter,
   OverlayInjector,
   OverlayStore,
   PatchGenerator,
+  PendingHintStore,
   PluginHooks,
+  ReviewQueue,
   ReviewRunner,
   RollbackManager,
   SkillEvolutionConfig,
+  TargetResolver,
   Logger,
   ResolvedPaths
 } from '../shared/types.js';
@@ -29,9 +36,13 @@ import OverlayInjectorImpl from './overlay/overlay_injector.js';
 import OverlayStoreImpl from './overlay/overlay_store.js';
 import MergeManagerImpl from '../review/merge_manager.js';
 import PatchGeneratorImpl from '../review/patch_generator.js';
-import ReviewRunnerImpl from '../review/review_runner.js';
+import { LlmReviewRunner, DeterministicReviewRunner } from '../review/llm_review_runner.js';
 import RollbackManagerImpl from '../review/rollback_manager.js';
 import { ConsoleLogger } from '../shared/logger.js';
+import { ErrorNormalizerImpl } from '../shared/error_normalizer.js';
+import { TargetResolverImpl } from '../shared/target_resolver.js';
+import { NoiseFilterImpl } from '../shared/noise_filter.js';
+import { PendingHintStoreImpl } from '../shared/pending_hint_store.js';
 
 /**
  * Concrete plugin composition root and hook implementation.
@@ -59,6 +70,21 @@ export class SkillEvolutionPlugin implements PluginHooks {
 
   public rollbackManager: RollbackManager;
 
+  public readonly targetResolver: TargetResolver;
+
+  public readonly errorNormalizer: ErrorNormalizer;
+
+  public readonly noiseFilter: NoiseFilter;
+
+  public readonly pendingHintStore: PendingHintStore;
+
+  public reviewQueue: ReviewQueue | undefined;
+
+  public agentId: string = 'unknown';
+
+  /** Tracks evolution targets seen per session for aggregation at session_end. */
+  private readonly sessionTargets: Map<string, EvolutionTarget[]>;
+
   private readonly sessionSkillKeys: Map<string, string>;
 
   private readonly sessionStartedAt: Map<string, number>;
@@ -68,7 +94,12 @@ export class SkillEvolutionPlugin implements PluginHooks {
   /**
    * Initializes plugin dependencies with defaults for v1 skeleton.
    */
-  public constructor(config: SkillEvolutionConfig = getDefaultConfig(), workspaceDir?: string) {
+  public constructor(
+    config: SkillEvolutionConfig = getDefaultConfig(),
+    workspaceDir?: string,
+    llmClient?: LlmClient,
+    reviewQueue?: ReviewQueue
+  ) {
     this.config = config;
     this.paths = resolvePaths(workspaceDir ?? process.cwd(), this.config);
     this.workspaceBound = !!workspaceDir;
@@ -77,17 +108,28 @@ export class SkillEvolutionPlugin implements PluginHooks {
     this.overlayInjector = new OverlayInjectorImpl();
     this.feedbackCollector = new FeedbackCollectorImpl(this.paths.feedbackDir);
     this.feedbackClassifier = new FeedbackClassifierImpl();
-    this.reviewRunner = new ReviewRunnerImpl(this.config);
+
+    this.targetResolver = new TargetResolverImpl();
+    this.errorNormalizer = new ErrorNormalizerImpl();
+    this.noiseFilter = new NoiseFilterImpl();
+    this.pendingHintStore = new PendingHintStoreImpl();
+
+    const deterministicFallback = new DeterministicReviewRunner(this.config);
+    this.reviewRunner = new LlmReviewRunner(this.config, llmClient ?? null, deterministicFallback);
+
     this.patchGenerator = new PatchGeneratorImpl();
     this.rollbackManager = new RollbackManagerImpl(this.config, this.paths.backupsDir, this.paths.skillsDir);
     this.mergeManager = new MergeManagerImpl(
       this.config,
       this.rollbackManager,
       this.paths.skillsDir,
-      this.paths.patchesDir
+      this.paths.patchesDir,
+      this.paths.globalDir
     );
+    this.reviewQueue = reviewQueue;
     this.sessionSkillKeys = new Map<string, string>();
     this.sessionStartedAt = new Map<string, number>();
+    this.sessionTargets = new Map<string, EvolutionTarget[]>();
   }
 
   public ensureWorkspaceDir(workspaceDir: string): void {
@@ -103,7 +145,8 @@ export class SkillEvolutionPlugin implements PluginHooks {
       this.config,
       this.rollbackManager,
       this.paths.skillsDir,
-      this.paths.patchesDir
+      this.paths.patchesDir,
+      this.paths.globalDir
     );
     this.logger.info('Workspace bound from runtime context', { workspaceDir });
   }
@@ -153,12 +196,16 @@ export class SkillEvolutionPlugin implements PluginHooks {
     }
   }
 
+  public setAgentId(agentId: string): void {
+    this.agentId = agentId;
+  }
+
   public setSessionSkillKey(sessionId: string, skillKey: string): void {
     this.sessionSkillKeys.set(sessionId, skillKey);
   }
 
   public getSessionSkillKey(sessionId: string): string {
-    return this.sessionSkillKeys.get(sessionId) ?? 'unknown-skill';
+    return this.sessionSkillKeys.get(sessionId) ?? '';
   }
 
   public getSessionStartTime(sessionId: string): number {
@@ -168,7 +215,26 @@ export class SkillEvolutionPlugin implements PluginHooks {
   public endSession(sessionId: string): void {
     this.sessionSkillKeys.delete(sessionId);
     this.sessionStartedAt.delete(sessionId);
+    this.sessionTargets.delete(sessionId);
     this.logger.debug('Session ended', { sessionId });
+  }
+
+  public addSessionTarget(sessionId: string, target: EvolutionTarget): void {
+    const targets = this.sessionTargets.get(sessionId) ?? [];
+    const exists = targets.some((t) => t.storageKey === target.storageKey);
+    if (!exists) {
+      targets.push(target);
+      this.sessionTargets.set(sessionId, targets);
+    }
+  }
+
+  public getSessionTargets(sessionId: string): EvolutionTarget[] {
+    return this.sessionTargets.get(sessionId) ?? [];
+  }
+
+  public getLastSessionTarget(sessionId: string): EvolutionTarget | undefined {
+    const targets = this.sessionTargets.get(sessionId);
+    return targets && targets.length > 0 ? targets[targets.length - 1] : undefined;
   }
 }
 

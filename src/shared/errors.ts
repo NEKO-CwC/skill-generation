@@ -51,3 +51,41 @@ export class InvalidConfigError extends Error {
     this.name = 'InvalidConfigError';
   }
 }
+
+/**
+ * Raised when auth resolution cannot find valid credentials.
+ */
+export class AuthResolutionError extends Error {
+  public readonly attemptedSources: string[];
+
+  public constructor(message: string, attemptedSources: string[] = []) {
+    super(message);
+    this.name = 'AuthResolutionError';
+    this.attemptedSources = attemptedSources;
+  }
+}
+
+/**
+ * Raised when an LLM API call fails.
+ */
+export class LlmCallError extends Error {
+  public readonly statusCode?: number;
+  public readonly provider?: string;
+
+  public constructor(message: string, statusCode?: number, provider?: string) {
+    super(message);
+    this.name = 'LlmCallError';
+    this.statusCode = statusCode;
+    this.provider = provider;
+  }
+}
+
+/**
+ * Raised when review queue operations fail.
+ */
+export class ReviewQueueError extends Error {
+  public constructor(message: string) {
+    super(message);
+    this.name = 'ReviewQueueError';
+  }
+}

@@ -32,11 +32,24 @@ export function getDefaultConfig(): SkillEvolutionConfig {
     llm: {
       inheritPrimaryConfig: true,
       modelOverride: null,
-      thinkingOverride: null
+      thinkingOverride: null,
+      mode: 'disabled',
+      provider: 'anthropic',
+      baseUrlOverride: null,
+      authProfileRef: null,
+      keyRef: null,
+      allowExecSecretRef: false,
+      allowGatewayFallback: false
     },
     review: {
+      engine: 'deterministic',
       minEvidenceCount: 2,
       allowAutoMergeOnLowRiskOnly: false
+    },
+    queue: {
+      pollIntervalMs: 30000,
+      leaseMs: 300000,
+      maxAttempts: 3
     }
   };
 }
@@ -123,11 +136,62 @@ export function validateConfig(config: SkillEvolutionConfig): void {
   if (config.llm.thinkingOverride !== null && typeof config.llm.thinkingOverride !== 'boolean') {
     throw new InvalidConfigError('skillEvolution.llm.thinkingOverride must be boolean or null.');
   }
+
+  const validLlmModes = ['inherit-or-fallback', 'explicit', 'disabled'];
+  if (!validLlmModes.includes(config.llm.mode)) {
+    throw new InvalidConfigError(`skillEvolution.llm.mode must be one of: ${validLlmModes.join(', ')}.`);
+  }
+  const validProviders = ['anthropic', 'openai-compatible', 'custom'];
+  if (!validProviders.includes(config.llm.provider)) {
+    throw new InvalidConfigError(`skillEvolution.llm.provider must be one of: ${validProviders.join(', ')}.`);
+  }
+  if (config.llm.baseUrlOverride !== null && typeof config.llm.baseUrlOverride !== 'string') {
+    throw new InvalidConfigError('skillEvolution.llm.baseUrlOverride must be string or null.');
+  }
+  if (config.llm.authProfileRef !== null && typeof config.llm.authProfileRef !== 'string') {
+    throw new InvalidConfigError('skillEvolution.llm.authProfileRef must be string or null.');
+  }
+  if (config.llm.keyRef !== null) {
+    if (typeof config.llm.keyRef !== 'object') {
+      throw new InvalidConfigError('skillEvolution.llm.keyRef must be an object or null.');
+    }
+    const validSources = ['env', 'file', 'exec'];
+    if (!validSources.includes(config.llm.keyRef.source)) {
+      throw new InvalidConfigError(`skillEvolution.llm.keyRef.source must be one of: ${validSources.join(', ')}.`);
+    }
+    if (typeof config.llm.keyRef.id !== 'string' || config.llm.keyRef.id.length === 0) {
+      throw new InvalidConfigError('skillEvolution.llm.keyRef.id must be a non-empty string.');
+    }
+    if (config.llm.keyRef.source === 'exec' && !config.llm.allowExecSecretRef) {
+      throw new InvalidConfigError('skillEvolution.llm.keyRef.source=exec requires llm.allowExecSecretRef=true.');
+    }
+  }
+  if (typeof config.llm.allowExecSecretRef !== 'boolean') {
+    throw new InvalidConfigError('skillEvolution.llm.allowExecSecretRef must be a boolean.');
+  }
+  if (typeof config.llm.allowGatewayFallback !== 'boolean') {
+    throw new InvalidConfigError('skillEvolution.llm.allowGatewayFallback must be a boolean.');
+  }
+
+  const validEngines = ['deterministic', 'llm'];
+  if (!validEngines.includes(config.review.engine)) {
+    throw new InvalidConfigError(`skillEvolution.review.engine must be one of: ${validEngines.join(', ')}.`);
+  }
   if (!Number.isInteger(config.review.minEvidenceCount) || config.review.minEvidenceCount < 0) {
     throw new InvalidConfigError('skillEvolution.review.minEvidenceCount must be an integer >= 0.');
   }
   if (typeof config.review.allowAutoMergeOnLowRiskOnly !== 'boolean') {
     throw new InvalidConfigError('skillEvolution.review.allowAutoMergeOnLowRiskOnly must be a boolean.');
+  }
+
+  if (!Number.isInteger(config.queue.pollIntervalMs) || config.queue.pollIntervalMs < 1000) {
+    throw new InvalidConfigError('skillEvolution.queue.pollIntervalMs must be an integer >= 1000.');
+  }
+  if (!Number.isInteger(config.queue.leaseMs) || config.queue.leaseMs < 10000) {
+    throw new InvalidConfigError('skillEvolution.queue.leaseMs must be an integer >= 10000.');
+  }
+  if (!Number.isInteger(config.queue.maxAttempts) || config.queue.maxAttempts < 1) {
+    throw new InvalidConfigError('skillEvolution.queue.maxAttempts must be an integer >= 1.');
   }
 }
 
@@ -157,6 +221,10 @@ function deepMerge(defaultConfig: SkillEvolutionConfig, source: SkillEvolutionCo
     review: {
       ...defaultConfig.review,
       ...source.review
+    },
+    queue: {
+      ...defaultConfig.queue,
+      ...source.queue
     }
   };
 }

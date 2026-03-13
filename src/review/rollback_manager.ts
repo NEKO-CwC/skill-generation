@@ -8,35 +8,9 @@ import ConsoleLogger from '../shared/logger.js';
 import { ensureDir, fileExists, readFile, writeFile } from '../shared/fs.js';
 import type { RollbackManager, SkillVersion } from '../shared/types.js';
 import type { SkillEvolutionConfig } from '../shared/types.js';
+import { getDefaultConfig } from '../plugin/config.js';
 
-const DEFAULT_CONFIG: SkillEvolutionConfig = {
-  enabled: true,
-  merge: {
-    requireHumanMerge: true,
-    maxRollbackVersions: 5
-  },
-  sessionOverlay: {
-    enabled: true,
-    storageDir: '.skill-overlays',
-    injectMode: 'system-context',
-    clearOnSessionEnd: true
-  },
-  triggers: {
-    onToolError: true,
-    onUserCorrection: true,
-    onSessionEndReview: true,
-    onPositiveFeedback: true
-  },
-  llm: {
-    inheritPrimaryConfig: true,
-    modelOverride: null,
-    thinkingOverride: null
-  },
-  review: {
-    minEvidenceCount: 2,
-    allowAutoMergeOnLowRiskOnly: false
-  }
-};
+const DEFAULT_CONFIG: SkillEvolutionConfig = getDefaultConfig();
 
 /**
  * Default rollback manager placeholder implementation.

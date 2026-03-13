@@ -14,7 +14,8 @@ import type {
   OpenClawPluginApi,
   PluginHookAgentContext,
   PluginHookMessageContext,
-  PluginHookToolContext
+  PluginHookToolContext,
+  PluginService
 } from '../../src/shared/types.ts';
 
 type HookName = 'before_prompt_build' | 'after_tool_call' | 'message_received' | 'agent_end' | 'session_end';
@@ -46,6 +47,10 @@ class MockOpenClawApi implements OpenClawPluginApi {
 
   public on<K extends HookName>(hookName: K, handler: HookHandlerMap[K], opts?: HookOptions): void {
     this.hooks.push({ name: hookName, handler, opts } as RegisteredHook);
+  }
+
+  public registerService(_service: PluginService): void {
+    // no-op for tests
   }
 }
 

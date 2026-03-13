@@ -5,9 +5,6 @@
 import type { FeedbackEvent, OverlayEntry } from '../../shared/types.js';
 import type { SkillEvolutionPlugin } from '../index.js';
 
-/**
- * Handles message-received classification flow.
- */
 export async function message_received(plugin: SkillEvolutionPlugin, sessionId: string, message: string): Promise<void> {
   plugin.ensureSessionStarted(sessionId);
   const skillKey = plugin.getSessionSkillKey(sessionId);
@@ -23,6 +20,10 @@ export async function message_received(plugin: SkillEvolutionPlugin, sessionId: 
     return;
   }
 
+  const lastTarget = plugin.getLastSessionTarget(sessionId);
+  const target = lastTarget ?? plugin.targetResolver.resolve('', skillKey);
+  plugin.addSessionTarget(sessionId, target);
+
   const existingEvents = await plugin.feedbackCollector.getSessionFeedback(sessionId);
   const candidateEvent: FeedbackEvent = {
     sessionId,
@@ -30,7 +31,8 @@ export async function message_received(plugin: SkillEvolutionPlugin, sessionId: 
     timestamp: Date.now(),
     eventType,
     severity: 'low',
-    messageExcerpt: message.slice(0, 280)
+    messageExcerpt: message.slice(0, 280),
+    target
   };
 
   const severity = plugin.feedbackClassifier.assessSeverity([...existingEvents, candidateEvent]);
@@ -46,16 +48,17 @@ export async function message_received(plugin: SkillEvolutionPlugin, sessionId: 
   }
 
   if (eventType === 'user_correction') {
-    const existing = await plugin.overlayStore.read(sessionId, skillKey);
+    const overlaySkillKey = target.storageKey;
+    const existing = await plugin.overlayStore.read(sessionId, overlaySkillKey);
     if (existing) {
-      await plugin.overlayStore.update(sessionId, skillKey, {
+      await plugin.overlayStore.update(sessionId, overlaySkillKey, {
         content: existing.content + `\nAdditional correction: ${message.slice(0, 400)}`,
         updatedAt: Date.now()
       });
     } else {
       const overlayEntry: OverlayEntry = {
         sessionId,
-        skillKey,
+        skillKey: overlaySkillKey,
         content: `User correction received. Apply corrected behavior in this session.\nCorrection excerpt: ${message.slice(0, 400)}`,
         createdAt: Date.now(),
         updatedAt: Date.now(),

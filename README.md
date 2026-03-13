@@ -1,87 +1,173 @@
 # OpenClaw Skill Evolution Plugin
 
-让 OpenClaw 的 skills 根据真实使用反馈持续演进的插件。
+A TypeScript plugin that enables SKILL.md files to evolve based on real usage feedback. The plugin captures tool errors, user corrections, and positive signals during sessions, then reviews accumulated evidence to propose safe, incremental improvements to skill documents.
 
-它会在 session 中收集工具错误、用户纠正和正向反馈，生成**仅当前 session 生效**的临时 overlay；在 session 结束后再进行复盘，产出 patch，并按配置选择**人工 merge**或**自动 merge**。同时为每个 skill 保留最多 **5 个回滚版本**。
+## How It Works
 
-## 这是什么
+The plugin operates through a **dual-chain architecture**:
 
-这是一个 **OpenClaw plugin**，不是普通 skill。
+### Real-time chain (session hooks)
 
-- 用于让 skill 的 `SKILL.md` / 使用说明逐步适配真实工作流
-- 支持 session-local overlay，不会直接污染共享 skill 文件
-- 支持 session 结束后的 patch 生成、merge 和 rollback
-- 支持全局人工审核开关
-
-## 这不是什么
-
-请不要把它当成：
-
-- `skills/` 目录下的 skill 包
-- 依赖 `SKILL.md` 被发现的技能
-- 复制进 `~/.openclaw/skills/` 就能工作的项目
-
-它应当通过 **OpenClaw plugins** 机制安装和启用。
-
-## 快速开始
-
-### Agent 安装
+During an active session, three hooks collect feedback and inject learned context:
 
 ```
-Install and configure the skill-generation plugin of openclaw by following the instructions here:
-https://raw.githubusercontent.com/NEKO-CwC/skill-generation/refs/heads/master/docs/install.md
+after_tool_call → ErrorNormalizer → NoiseFilter → TargetResolver → FeedbackCollector → OverlayStore
+message_received → FeedbackClassifier → FeedbackCollector → OverlayStore
+before_prompt_build → OverlayStore.listBySession → OverlayInjector → augmented prompt
+                    → PendingHintStore.getHints → hint injection
 ```
 
-### Human 安装
+- `after_tool_call` captures tool errors, normalizes them, filters noise, resolves targets, and creates session overlays
+- `message_received` detects user corrections and positive feedback via regex classifiers (English + Chinese patterns)
+- `before_prompt_build` injects accumulated overlays and pending hints into the prompt so the agent learns within the session
 
-完整安装与配置说明请看：
+### Background chain (review service)
 
-- [安装指南](./docs/install.md)
-- [配置说明](./docs/config.md)
-- [故障排查](./docs/troubleshooting.md)
+When a session ends, the plugin enqueues review tasks that a background worker processes asynchronously:
 
-最简流程：
+```
+session_end → enqueue ReviewTask → ReviewQueue (.skill-review-queue/)
+                                         ↓
+ReviewWorker polls → dequeue task → review (deterministic or LLM)
+                                         ↓
+                   PatchGenerator.generateSplit → PatchOutput { reportPatch, mergeableDocument }
+                                         ↓
+                   MergeManager.mergeWithTarget → target path (or .skill-patches/ for manual)
+```
+
+The worker runs on a configurable poll interval (default 30s), acquires a lease on each task, and handles retries up to `queue.maxAttempts` before moving failed tasks to `.skill-review-queue/failed/`.
+
+## Target Model
+
+Feedback is routed to one of four target kinds based on the tool name and skill key:
+
+| Kind | Key example | Storage path | Merge mode |
+|------|-------------|-------------|------------|
+| `skill` | `my-deploy-skill` | `skills/<key>/SKILL.md` | `skill-doc` |
+| `builtin` | `Bash`, `Read`, `Write` | `.skill-global/tools/<tool>.md` | `global-doc` |
+| `global` | `default` | `.skill-global/DEFAULT_SKILL.md` | `global-doc` |
+| `unresolved` | `unknown-tool` | `.skill-patches/<key>/` (queue only) | `queue-only` |
+
+- Builtin and global learnings go to `.skill-global/`, not `skills/`
+- Unresolved targets are queued for human review but never auto-merged
+- User corrections bind to the most recent session target
+
+## Review Modes
+
+### Deterministic review (default)
+
+```yaml
+review:
+  engine: deterministic
+```
+
+Rule-based heuristics evaluate accumulated evidence (error count, correction count, overlay count). No external dependencies required. Risk level is computed from combined error and correction counts.
+
+### LLM review
+
+```yaml
+review:
+  engine: llm
+```
+
+An LLM evaluates session evidence and produces a candidate document. If the LLM client is unavailable or auth resolution returns null, the plugin automatically falls back to deterministic review. LLM review requires configuring auth via the `llm` section.
+
+### LLM auth modes
+
+| `llm.mode` | Behavior |
+|-------------|----------|
+| `disabled` (default) | No LLM client created. Deterministic review only. |
+| `inherit-or-fallback` | Attempt to inherit the current agent's auth profile. Fall back to gateway if `allowGatewayFallback=true`. |
+| `explicit` | Use `keyRef` (SecretRef) or `authProfileRef` to provide credentials directly. |
+
+## Configuration
+
+Config is provided through OpenClaw's plugin config mechanism at `plugins.entries.skill-evolution.config`:
+
+```yaml
+skillEvolution:
+  enabled: true
+  review:
+    engine: llm
+    minEvidenceCount: 2
+  llm:
+    mode: inherit-or-fallback
+    provider: anthropic
+  merge:
+    requireHumanMerge: true
+    maxRollbackVersions: 5
+  queue:
+    pollIntervalMs: 30000
+    leaseMs: 300000
+    maxAttempts: 3
+```
+
+See [docs/config.md](./docs/config.md) for the full configuration reference and [examples/config.example.yaml](./examples/config.example.yaml) for copy-pasteable examples.
+
+## Commands
+
+```bash
+npm install          # Install dependencies
+npm run build        # TypeScript compilation to dist/
+npm run test         # Run all tests (vitest)
+npm run test:watch   # Run tests in watch mode
+npm run lint         # Type check only (tsc --noEmit)
+```
+
+Run a single test file:
+
+```bash
+npx vitest run tests/plugin/test_config.ts
+```
+
+## Installation
 
 ```bash
 git clone https://github.com/NEKO-CwC/skill-generation.git
 cd skill-generation
 npm install
 npm run build
-npm run test
 
 openclaw plugins install -l .
 openclaw plugins enable skill-evolution
-````
-
-然后把配置写到 OpenClaw 主配置里的：
-
-```jsonc
-plugins.entries.skill-evolution.config
 ```
 
-最后重启 OpenClaw，并用下面命令验证：
+Then add your config to the OpenClaw main config under `plugins.entries.skill-evolution.config`.
+
+## Verification
+
+After installation, verify the plugin is working:
 
 ```bash
+# Check plugin is registered and enabled
 openclaw plugins list
 openclaw plugins info skill-evolution
+
+# Run plugin diagnostics
 openclaw plugins doctor
 ```
 
-## 注意事项
+During a session, look for structured JSON log lines prefixed with `[skill-evolution]`. Key indicators:
 
-* 这是 **plugin，不是 skill**
-* 不要放进 `skills/`
-* 不要用 `openclaw skills list` 验证安装
-* 如果 overlay 没有注入 prompt，优先检查：
-  `plugins.entries.skill-evolution.hooks.allowPromptInjection`
+- `"Workspace bound from runtime context"` -- plugin has resolved the workspace directory
+- `"Feedback collected"` -- tool errors or user corrections are being captured
+- `"Overlay created"` / `"Overlay injected"` -- session overlays are active
+- `"Review worker started"` -- background review service is polling
+- `"Task enqueued"` / `"Task completed"` -- review tasks are being processed
 
-## 核心能力
+If overlay injection is not appearing in prompts, check that `plugins.entries.skill-evolution.hooks.allowPromptInjection` is not set to `false` in your OpenClaw config.
 
-* 收集工具失败、用户纠正、正向反馈
-* 支持中英文反馈识别（如"错了"、"应该"、"不对" 等中文纠正模式）
-* 反馈事件持久化到 .skill-feedback/ 目录，重启后可审计
-* 生成 session-local overlay
-* 在 session 结束时执行 deterministic review
-* 生成 patch，并支持 manual / auto merge
-* 保留最多 5 个 skill 历史版本用于回滚
+## Runtime Storage
 
+All paths are relative to the resolved workspace root:
+
+```
+.skill-overlays/<session-id>/<skill-key>.json   -- ephemeral session overlays
+.skill-backups/<skill-key>/<version-id>.json    -- rollback history (max 5 per skill)
+.skill-patches/<storage-key>/<patch-id>.md      -- pending manual merge patches / audit reports
+.skill-feedback/<session-id>.jsonl              -- feedback audit trail
+.skill-global/DEFAULT_SKILL.md                  -- global default learnings
+.skill-global/tools/<tool>.md                   -- builtin tool learnings
+.skill-review-queue/<task-id>.json              -- pending review tasks
+.skill-review-queue/failed/<task-id>.json       -- exhausted review tasks
+```

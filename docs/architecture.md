@@ -7,49 +7,61 @@ This document defines the runtime architecture, module boundaries, data flows, a
 The system is designed with strictly one-directional dependencies to prevent circular imports and ensure clear responsibility boundaries. Session-local overlays are strictly ephemeral and isolated from the global shared `SKILL.md` state until formal review and merge.
 
 ```text
-┌─────────────────────────────────────────────────────────┐
-│                     OpenClaw Core                       │
-└────┬──────────────────────┬───────────────────────┬─────┘
-     │ Hooks                │ Tool/Msg context      │ Agent lifecycle
-     ▼                      ▼                       ▼
-┌───────────────┐     ┌────────────────┐      ┌───────────────┐
-│ OverlayInjector│◄────┤ Plugin Hooks   ├─────►│FeedbackCollector│
-└──────┬────────┘     └────────────────┘      └───────┬───────┘
-       │                      │                       │
-       │                      ▼                       ▼
-       │               ┌────────────────┐      ┌───────────────┐
-       └──────────────►│  OverlayStore  │◄─────┤FeedbackClassif.│
-                       └──────┬─────────┘      └───────────────┘
-                              │
-                              ▼
-                       ┌────────────────┐
-                       │  ReviewRunner  │
-                       └──────┬─────────┘
-                              │
-                              ▼
-                       ┌────────────────┐
-                       │ PatchGenerator │
-                       └──────┬─────────┘
-                              │
-                              ▼
-                       ┌────────────────┐
-                       │  MergeManager  │
-                       └──────┬─────────┘
-                              │
-                              ▼
-                       ┌────────────────┐
-                       │ RollbackManager│
-                       └────────────────┘
+┌───────────────────────────────────────────────────────────────────────────┐
+│                              OpenClaw Core                                │
+└─────┬───────────────────────────┬────────────────────────────┬────────────┘
+      │ Hooks                     │ Tool/Msg context           │ Agent lifecycle
+      ▼                           ▼                            ▼
+┌───────────────┐        ┌──────────────────┐        ┌───────────────────┐
+│OverlayInjector│◄───────┤   Plugin Hooks   ├───────►│ FeedbackCollector │
+└───────┬───────┘        └────────┬─────────┘        └─────────┬─────────┘
+        │                         │                            │
+        │           ┌─────────────┴─────────────┐              ▼
+        │           ▼                           ▼       ┌───────────────────┐
+        │   ┌────────────────┐         ┌──────────────┐ │ FeedbackClassif.  │
+        │   │ ErrorNormalizer│         │ NoiseFilter  │ └─────────┬─────────┘
+        │   └───────┬────────┘         └──────┬───────┘           │
+        │           │                         │                   │
+        │           ▼                         ▼                   │
+        │   ┌────────────────┐         ┌──────────────┐           │
+        │   │ TargetResolver ◄─────────┤PendingHintStr│           │
+        │   └───────┬────────┘         └──────┬───────┘           │
+        │           │                         │                   │
+        ▼           ▼                         ▼                   ▼
+┌───────────────┐   └───────────┬─────────────┴───────────────────┘
+│ OverlayStore  │◄──────────────┘
+└───────┬───────┘
+        │
+        ▼
+┌───────────────────────────────────────┐
+│ LlmReviewRunner / Determ.ReviewRunner │
+└───────┬───────────────────────────────┘
+        │
+        ▼
+┌────────────────┐
+│ PatchGenerator │
+└───────┬────────┘
+        │
+        ▼
+┌────────────────┐
+│  MergeManager  │
+└───────┬────────┘
+        │
+        ▼
+┌────────────────┐
+│ RollbackManager│
+└────────────────┘
 ```
 
 **Dependency Rules:**
-1. Hooks depend on Injector, Collector, and Store.
+1. Hooks depend on Injector, Collector, Store, Normalizer, Resolver, Filter, and HintStore.
 2. Injector depends on Store.
 3. Collector depends on Classifier.
-4. ReviewRunner depends on Store and Collector (to summarize the session). Collector persists events to `.skill-feedback/` on disk.
-5. PatchGenerator depends on ReviewRunner output.
-6. MergeManager depends on PatchGenerator output.
-7. RollbackManager operates independently but is invoked by MergeManager or CLI.
+4. Normalizer/Resolver/Filter/HintStore are utility services for Hooks and Review.
+5. ReviewRunner (LLM or Deterministic) depends on Store and Collector (to summarize the session). Collector persists events to `.skill-feedback/` on disk.
+6. PatchGenerator depends on ReviewRunner output.
+7. MergeManager depends on PatchGenerator output.
+8. RollbackManager operates independently but is invoked by MergeManager or CLI.
 
 ## 2. Data Flow
 
@@ -58,9 +70,13 @@ The lifecycle of skill evolution follows a strict 5-step workflow:
 1. **Session Start & Context Injection**:
    - Hook `before_prompt_build` triggers.
    - `OverlayInjector` queries `OverlayStore` for existing active overlays for the current session/skill.
-   - Temporary skill adjustments are injected into the agent's system prompt.
+   - `PendingHintStore` provides aggregated instructions for the current target.
+   - Temporary skill adjustments and pending hints are injected into the agent's system prompt.
 2. **Feedback Collection**:
    - Hooks `after_tool_call` and `message_received` trigger.
+   - `ErrorNormalizerImpl` extracts structured data from raw tool errors.
+   - `NoiseFilterImpl` assesses if the error is actionable or startup/environment noise.
+   - `TargetResolverImpl` determines if the event belongs to a specific skill, a builtin tool, or global behavior.
    - `FeedbackCollector` captures errors, corrections, and successes.
    - `FeedbackClassifier` evaluates severity and categorizes the event.
 3. **Feedback Persistence**:
@@ -70,11 +86,15 @@ The lifecycle of skill evolution follows a strict 5-step workflow:
    - **Invariant:** The global `SKILL.md` is NOT modified.
 4. **Session-End Review**:
    - `agent_end` fires per-turn: logs run-level stats only (duration, event count). Does NOT trigger review or clear session state.
-   - `session_end` fires once at session end: aggregates all session feedback and overlays, triggers ReviewRunner, PatchGenerator, MergeManager, and clears overlays/session state.
+   - `session_end` fires once at session end: aggregates all session feedback and overlays.
+   - Triggers `LlmReviewRunner` (with `DeterministicReviewRunner` fallback).
+   - `PatchGenerator` produces `PatchOutput` with separate `reportPatch` and `mergeableDocument`.
+   - `MergeManager` uses `mergeWithTarget()` for target-aware merge.
+   - Clears overlays/session state.
 5. **Merge & Rollback**:
    - `MergeManager` evaluates the patch against the merge policy (`requireHumanMerge`).
    - If auto-merge is permitted, `RollbackManager` creates a backup.
-   - The patch is applied to the global `SKILL.md`. Rollbacks are capped at 5 versions.
+   - The mergeable document is applied to the appropriate target file (e.g. `SKILL.md` for skills). Rollbacks are capped at 5 versions.
 
 ## 3. State Machine
 
@@ -140,6 +160,53 @@ export interface FeedbackEvent {
   toolName?: string;
   messageExcerpt?: string;
   proposedOverlay?: string;
+  target?: EvolutionTarget;
+  normalizedError?: NormalizedToolError;
+  noiseDisposition?: NoiseDisposition;
+}
+
+/** Evolution Target Types */
+export interface EvolutionTarget {
+  kind: 'skill' | 'builtin' | 'global' | 'unresolved';
+  key: string;
+  storageKey: string;
+  mergeMode: 'skill-doc' | 'global-doc' | 'queue-only';
+}
+
+/** Error context captured after normalization */
+export interface NormalizedToolError {
+  status: 'error';
+  toolName: string;
+  message: string;
+  errorType?: string;
+  exitCode?: number;
+  stderr?: string;
+  rawExcerpt: string;
+  fingerprint: string;
+  source: 'event.error' | 'result.status' | 'result.error' | 'text-pattern' | 'unknown';
+}
+
+/** In-memory hint store for frequent errors */
+export interface PendingHint {
+  target: EvolutionTarget;
+  fingerprint: string;
+  count: number;
+  lastError: string;
+  instruction: string;
+  expiresAt: number;
+}
+
+export type NoiseDisposition = 'ignore' | 'low-signal' | 'normal';
+
+/** Separated patch outputs: audit report + mergeable document */
+export interface PatchOutput {
+  reportPatch: string;
+  mergeableDocument: string | null;
+}
+
+/** LLM client interface for ReviewRunner */
+export interface LlmClient {
+  complete(prompt: string, systemPrompt?: string): Promise<string>;
 }
 
 /** Metadata for a generated skill patch. */
@@ -171,6 +238,7 @@ export interface SessionSummary {
   overlays: OverlayEntry[];
   durationMs: number;
   totalErrors: number;
+  targets?: EvolutionTarget[];
 }
 
 /** The output from the ReviewRunner. */
@@ -178,8 +246,13 @@ export interface ReviewResult {
   isModificationRecommended: boolean;
   justification: string;
   proposedDiff: string;
+  proposedDocument?: string;
+  changeSummary?: string;
+  evidenceSummary?: string;
+  target?: EvolutionTarget;
   riskLevel: 'low' | 'medium' | 'high';
   metadata: PatchMetadata;
+  reviewSource: 'llm' | 'deterministic';
 }
 
 /** Represents a backed-up version of a skill. */
@@ -307,10 +380,12 @@ export interface ReviewRunner {
 export interface PatchGenerator {
   /** Generates a standard patch/diff string based on review output. */
   generate(result: ReviewResult, originalContent: string): string;
+  /** Generates separated report and document content. */
+  generateSplit(result: ReviewResult, originalContent: string): PatchOutput;
 }
 
 /**
- * Applies patches to the global shared SKILL.md state enforcing merge policies.
+ * Applies patches to the global shared state enforcing merge policies.
  */
 export interface MergeManager {
   /** 
@@ -318,9 +393,34 @@ export interface MergeManager {
    * If `requireHumanMerge` is true, queues the patch instead of applying.
    */
   merge(skillKey: string, patchContent: string, metadata: PatchMetadata): Promise<boolean>;
-  
+  /** Target-aware merge. */
+  mergeWithTarget(target: EvolutionTarget, patchOutput: PatchOutput, metadata: PatchMetadata): Promise<boolean>;
   /** Checks if the current configuration allows auto-merging this specific patch. */
   checkMergePolicy(metadata: PatchMetadata): boolean;
+}
+
+/** Resolves tool calls and skill keys to specific evolution targets. */
+export interface TargetResolver {
+  resolve(toolName: string, skillKey: string, ctx?: Record<string, unknown>): EvolutionTarget;
+}
+
+/** Normalizes raw error objects into structured, safe formats. */
+export interface ErrorNormalizer {
+  normalize(toolName: string, event: { result?: unknown; error?: string }): NormalizedToolError | null;
+  safeStringify(value: unknown, maxLength?: number): string;
+}
+
+/** Filters out non-actionable startup or environment noise. */
+export interface NoiseFilter {
+  assess(toolName: string, output: string, normalizedError?: NormalizedToolError | null): NoiseDisposition;
+}
+
+/** Stores and serves pending instructions for recurring errors. */
+export interface PendingHintStore {
+  record(target: EvolutionTarget, fingerprint: string, errorMessage: string, instruction: string): void;
+  getHints(sessionId?: string): PendingHint[];
+  clearExpired(): void;
+  clear(): void;
 }
 
 /**
@@ -369,10 +469,11 @@ This table maps the repository structure to the interfaces defined in this archi
 | `src/plugin/feedback/collector.ts` | `FeedbackCollector` |
 | `src/plugin/feedback/classifiers.ts` | `FeedbackClassifier` (English + Chinese patterns) |
 | `src/plugin/config.ts` | `SkillEvolutionConfig` |
-| `src/review/review_runner.ts` | `ReviewRunner` (considers errors + corrections + overlays) |
-| `src/review/patch_generator.ts` | `PatchGenerator` |
-| `src/review/merge_manager.ts` | `MergeManager` |
-| `src/review/rollback_manager.ts` | `RollbackManager` |
+| `src/review/llm_review_runner.ts` | `LlmReviewRunner`, `DeterministicReviewRunner` |
+| `src/shared/error_normalizer.ts` | `ErrorNormalizer` |
+| `src/shared/target_resolver.ts` | `TargetResolver` |
+| `src/shared/noise_filter.ts` | `NoiseFilter` |
+| `src/shared/pending_hint_store.ts` | `PendingHintStore` |
 | `src/shared/types.ts` | `FeedbackEvent`, `PatchMetadata`, `OverlayEntry`, etc. |
 | `src/shared/paths.ts` | Unified workspace-relative path resolution (optional `skillsDir` override) |
 
@@ -395,7 +496,7 @@ The plugin does **not** read `workspaceDir` from the plugin config schema. Inste
 
 1. **Initialization**: Plugin starts with `process.cwd()` as the workspace directory.
 2. **First hook invocation**: `captureWorkspaceDir()` checks each hook context for `ctx.workspaceDir`. If present, it calls `plugin.ensureWorkspaceDir(workspaceDir)`.
-3. **Binding**: `ensureWorkspaceDir()` is idempotent — once bound, subsequent calls are no-ops. On first bind, it reconstructs all path-dependent modules (`OverlayStore`, `FeedbackCollector`, `RollbackManager`, `MergeManager`) with workspace-relative paths.
+3. **Binding**: `ensureWorkspaceDir()` is idempotent, so once bound, subsequent calls are no-ops. On first bind, it reconstructs all path-dependent modules (`OverlayStore`, `FeedbackCollector`, `RollbackManager`, `MergeManager`) with workspace-relative paths.
 4. **Rationale**: OpenClaw determines the actual workspace at runtime; hardcoding it in config would create a mismatch when the plugin is used across different projects.
 
 ## 9. Feedback Classification & Severity
@@ -420,3 +521,59 @@ Severity counts **both** `tool_error` and `user_correction` events:
 | 0 errors + 0 corrections | `low` |
 | ≥2 corrections OR ≥3 errors | `high` |
 | All other combinations (≥1 signal) | `medium` |
+
+## 10. Target Resolution
+
+Target resolution routes feedback and evolution signals to the correct shared document.
+
+### Target Kinds
+- **skill**: A specific user-defined skill (e.g. `skills/my-skill/SKILL.md`).
+- **builtin**: A core tool provided by the environment (e.g. `bash`, `read`, `write`).
+- **global**: General behavioral guidance used when no specific skill is active.
+- **unresolved**: Fallback for tools that aren't recognized as builtin or tied to a skill.
+
+### Routing Logic
+1. **Active Skill**: If a valid `skillKey` is present and it is not a reserved name (like `default-skill`), it resolves to a **skill** target.
+2. **Builtin Tool**: If the tool name is in the known list of builtin tools (e.g. `read`, `write`, `bash`), it resolves to a **builtin** target.
+3. **Default/Unknown**: If the skill key is `default-skill` or `unknown-skill`, it resolves to the **global** target.
+4. **Fallback**: Otherwise, it resolves to an **unresolved** target.
+
+### Storage and Merge
+| Kind | Storage Key | Merge Mode | Path |
+|------|-------------|------------|------|
+| skill | `<skill-key>` | `skill-doc` | `skills/<skill-key>/SKILL.md` |
+| builtin | `builtin-<tool>` | `global-doc` | `.skill-global/tools/<tool>.md` |
+| global | `global-default` | `global-doc` | `.skill-global/DEFAULT_SKILL.md` |
+| unresolved | `unresolved-<tool>` | `queue-only` | `.skill-patches/unresolved-<tool>/` (report only) |
+
+## 11. Noise Filtering
+
+Noise filtering prevents environment-specific or transient errors from triggering skill changes.
+
+### Dispositions
+- **ignore**: The event is discarded immediately.
+- **low-signal**: The event is recorded but does not trigger overlays or high-severity flags on its own.
+- **normal**: The event is actionable.
+
+### Noise Patterns
+- **Startup Noise**: `ENOENT` errors for common memory or configuration files (e.g. `.memory`, `AGENTS.md`, `.env`) that agents check during initialization.
+- **Environment Errors**: Missing API keys, `node_modules` not found, or `MODULE_NOT_FOUND` errors.
+- **Low-Signal Tool Patterns**: 
+  - `read` tool: `ENOENT` or `no such file` (often just exploratory).
+  - `glob` tool: `no matches` or `found 0`.
+- **Content Heuristics**: Short `ENOENT` messages with no substantive context are marked as low-signal.
+
+## 12. LLM Review Pipeline
+
+The v2 pipeline uses an LLM to generate high-quality document updates, with a deterministic fallback for reliability.
+
+### Review Runners
+- **LlmReviewRunner**: Uses the `LlmClient` interface to prompt an LLM with session evidence (errors, corrections, overlays) and current document content.
+- **DeterministicReviewRunner**: Fallback that aggregates overlays without LLM synthesis.
+
+### Pipeline Features
+- **Deterministic Fallback**: If the LLM client is missing or the call fails, the system automatically uses the deterministic runner.
+- **NO_MODIFICATION Handling**: If the LLM determines evidence is insufficient, it responds with `NO_MODIFICATION`, and no patch is generated.
+- **Split Output**: `PatchGenerator` produces a `PatchOutput` containing:
+  - **reportPatch**: A full audit log of the session (saved to `.skill-patches/`).
+  - **mergeableDocument**: The final document content (written to target file if auto-merge is enabled).
