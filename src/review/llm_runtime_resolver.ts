@@ -1,27 +1,20 @@
 import { join } from 'node:path';
-import { existsSync } from 'node:fs';
-import type { LlmResolver, Logger, ProviderConfigSource, ResolvedProvider } from '../shared/types.js';
+import { existsSync, readFileSync } from 'node:fs';
+import type { LlmResolver, Logger, ParsedProvidersConfig, ResolvedProvider } from '../shared/types.js';
 import { ConsoleLogger } from '../shared/logger.js';
 
 /**
  * Resolves LLM provider configuration with strict priority:
- *   1. Injected ProviderConfigSource (from plugin host)
- *   2. Environment variables
- *   3. openclaw.json file (deprecated fallback)
- *   4. Error with structured diagnostics
+ *   1. Environment variables (key-only sufficient for OpenRouter/OpenAI/Anthropic)
+ *   2. openclaw.json file (based on bound workspace path)
+ *   3. Error with structured diagnostics
  */
 export class LlmRuntimeResolver implements LlmResolver {
   private readonly logger: Logger;
   private readonly workspaceDir: string;
-  private readonly providerConfig: ProviderConfigSource | null;
 
-  public constructor(
-    workspaceDir: string,
-    providerConfig: ProviderConfigSource | null,
-    logger?: Logger
-  ) {
+  public constructor(workspaceDir: string, logger?: Logger) {
     this.workspaceDir = workspaceDir;
-    this.providerConfig = providerConfig;
     this.logger = logger ?? new ConsoleLogger('llm_runtime_resolver');
   }
 
@@ -39,77 +32,46 @@ export class LlmRuntimeResolver implements LlmResolver {
       model,
       extractedProviderId,
       extractedModelId,
-      workspaceDir: this.workspaceDir,
-      hasInjectedConfig: !!this.providerConfig
+      workspaceDir: this.workspaceDir
     });
 
-    // Priority 1: Injected provider config
-    const injected = this.tryInjectedConfig(extractedProviderId, extractedModelId);
-    if (injected) return injected;
-
-    // Priority 2: Environment variables
+    // Priority 1: Environment variables
     const env = this.tryEnvironment(extractedModelId);
     if (env) return env;
 
-    // Priority 3: openclaw.json file (deprecated fallback)
+    // Priority 2: openclaw.json file
     const file = this.tryOpenClawConfigFile(extractedProviderId, extractedModelId);
     if (file) return file;
 
-    // Priority 4: Error with diagnostics
-    const attempted: string[] = [];
-    if (this.providerConfig) {
-      attempted.push(`injected config (providers: ${Object.keys(this.providerConfig.providers ?? {}).join(', ') || 'none'})`);
-    } else {
-      attempted.push('injected config (not provided)');
-    }
-    attempted.push('env: OPENCLAW_ANYROUTER_BASE_URL/API_KEY');
-    attempted.push('env: OPENROUTER_BASE_URL/API_KEY');
-    attempted.push('env: OPENAI_BASE_URL/API_KEY');
-    attempted.push('env: ANTHROPIC_API_KEY');
-    attempted.push(`file: ${join(this.workspaceDir, '..', 'openclaw.json')}`);
+    // All sources exhausted — structured error
+    const configCandidates = this.getConfigCandidatePaths();
+    const attemptedSources: string[] = [
+      'env: OPENCLAW_ANYROUTER_BASE_URL + OPENCLAW_ANYROUTER_API_KEY',
+      'env: OPENROUTER_API_KEY (+ optional OPENROUTER_BASE_URL)',
+      'env: OPENAI_API_KEY (+ optional OPENAI_BASE_URL)',
+      'env: ANTHROPIC_API_KEY',
+      ...configCandidates.map(p => `file: ${p} (exists: ${existsSync(p)})`)
+    ];
 
-    const message = `LLM provider not configured for model "${model}". Attempted sources:\n${attempted.map(s => `  - ${s}`).join('\n')}`;
+    const message = [
+      `LLM provider not configured for model "${model}".`,
+      `Workspace: ${this.workspaceDir}`,
+      'Attempted sources:',
+      ...attemptedSources.map(s => `  - ${s}`)
+    ].join('\n');
+
     this.logger.error('LLM provider resolution failed', {
       model,
       extractedProviderId,
       workspaceDir: this.workspaceDir,
-      attemptedSources: attempted
+      attemptedSources,
+      attemptedConfigPaths: configCandidates
     });
     throw new Error(message);
   }
 
-  private tryInjectedConfig(providerId: string | null, modelId: string): ResolvedProvider | null {
-    const providers = this.providerConfig?.providers;
-    if (!providers || Object.keys(providers).length === 0) {
-      return null;
-    }
-
-    let match: { baseUrl: string; apiKey: string; api?: 'openai' | 'anthropic-messages' } | undefined;
-
-    if (providerId && providers[providerId]) {
-      match = providers[providerId];
-      this.logger.debug('Resolved from injected config by provider ID', { providerId });
-    } else if (providers['anyrouter']) {
-      match = providers['anyrouter'];
-      this.logger.debug('Resolved from injected config via anyrouter fallback');
-    } else if (providers['openrouter']) {
-      match = providers['openrouter'];
-      this.logger.debug('Resolved from injected config via openrouter fallback');
-    }
-
-    if (!match) return null;
-
-    return {
-      baseUrl: match.baseUrl,
-      apiKey: match.apiKey,
-      api: match.api ?? 'anthropic-messages',
-      modelId,
-      resolvedFrom: 'injected'
-    };
-  }
-
   private tryEnvironment(modelId: string): ResolvedProvider | null {
-    // OPENCLAW_ANYROUTER
+    // AnyRouter: requires both base URL and API key
     const anyrouterUrl = process.env.OPENCLAW_ANYROUTER_BASE_URL;
     const anyrouterKey = process.env.OPENCLAW_ANYROUTER_API_KEY;
     if (anyrouterUrl && anyrouterKey) {
@@ -117,23 +79,23 @@ export class LlmRuntimeResolver implements LlmResolver {
       return { baseUrl: anyrouterUrl, apiKey: anyrouterKey, api: 'anthropic-messages', modelId, resolvedFrom: 'env' };
     }
 
-    // OPENROUTER
-    const openrouterUrl = process.env.OPENROUTER_BASE_URL;
+    // OpenRouter: key required, base URL optional (default: https://openrouter.ai/api/v1)
     const openrouterKey = process.env.OPENROUTER_API_KEY;
-    if (openrouterUrl && openrouterKey) {
+    if (openrouterKey) {
+      const openrouterUrl = process.env.OPENROUTER_BASE_URL ?? 'https://openrouter.ai/api/v1';
       this.logger.debug('Resolved from env OPENROUTER', { baseUrl: openrouterUrl.substring(0, 30) });
       return { baseUrl: openrouterUrl, apiKey: openrouterKey, api: 'openai', modelId, resolvedFrom: 'env' };
     }
 
-    // OPENAI
-    const openaiUrl = process.env.OPENAI_BASE_URL;
+    // OpenAI: key required, base URL optional (default: https://api.openai.com)
     const openaiKey = process.env.OPENAI_API_KEY;
-    if (openaiUrl && openaiKey) {
+    if (openaiKey) {
+      const openaiUrl = process.env.OPENAI_BASE_URL ?? 'https://api.openai.com';
       this.logger.debug('Resolved from env OPENAI', { baseUrl: openaiUrl.substring(0, 30) });
       return { baseUrl: openaiUrl, apiKey: openaiKey, api: 'openai', modelId, resolvedFrom: 'env' };
     }
 
-    // ANTHROPIC (baseUrl defaults)
+    // Anthropic: key required, base URL fixed
     const anthropicKey = process.env.ANTHROPIC_API_KEY;
     if (anthropicKey) {
       this.logger.debug('Resolved from env ANTHROPIC_API_KEY');
@@ -144,54 +106,79 @@ export class LlmRuntimeResolver implements LlmResolver {
   }
 
   private tryOpenClawConfigFile(providerId: string | null, modelId: string): ResolvedProvider | null {
-    const configPath = join(this.workspaceDir, '..', 'openclaw.json');
+    const candidates = this.getConfigCandidatePaths();
 
-    this.logger.debug('Trying deprecated openclaw.json fallback', { configPath });
+    for (const configPath of candidates) {
+      this.logger.debug('Trying openclaw.json candidate', { configPath, exists: existsSync(configPath) });
 
-    if (!existsSync(configPath)) {
-      return null;
-    }
-
-    try {
-      // Synchronous read for simplicity in resolve()
-      const fs = require('node:fs');
-      const configContent = fs.readFileSync(configPath, 'utf8');
-      const config = JSON.parse(configContent);
-      const providers = config?.models?.providers;
-
-      if (!providers) return null;
-
-      let match: { baseUrl?: string; apiKey?: string; api?: string } | undefined;
-
-      if (providerId && providers[providerId]) {
-        match = providers[providerId];
-      } else if (providers['anyrouter']) {
-        match = providers['anyrouter'];
-      } else if (providers['openrouter']) {
-        match = providers['openrouter'];
+      if (!existsSync(configPath)) {
+        continue;
       }
 
-      if (match?.baseUrl && match?.apiKey) {
-        this.logger.warn('Resolved from openclaw.json file (deprecated fallback)', {
+      try {
+        const configContent = readFileSync(configPath, 'utf8');
+        const config = JSON.parse(configContent) as Record<string, unknown>;
+        const models = config?.models as Record<string, unknown> | undefined;
+        const providers = models?.providers as ParsedProvidersConfig['providers'] | undefined;
+
+        if (!providers) {
+          this.logger.debug('openclaw.json found but no models.providers section', { configPath });
+          continue;
+        }
+
+        let match: { baseUrl?: string; apiKey?: string; api?: string } | undefined;
+        let matchedProvider: string | null = null;
+
+        if (providerId && providers[providerId]) {
+          match = providers[providerId];
+          matchedProvider = providerId;
+        } else if (providers['anyrouter']) {
+          match = providers['anyrouter'];
+          matchedProvider = 'anyrouter';
+        } else if (providers['openrouter']) {
+          match = providers['openrouter'];
+          matchedProvider = 'openrouter';
+        }
+
+        if (match?.baseUrl && match?.apiKey) {
+          this.logger.info('Resolved from openclaw.json file', {
+            configPath,
+            matchedProvider
+          });
+          return {
+            baseUrl: match.baseUrl,
+            apiKey: match.apiKey,
+            api: (match.api === 'openai' ? 'openai' : 'anthropic-messages'),
+            modelId,
+            resolvedFrom: 'openclaw-config'
+          };
+        }
+
+        this.logger.debug('openclaw.json provider found but missing baseUrl or apiKey', {
           configPath,
-          providerId: providerId ?? 'anyrouter/openrouter'
+          matchedProvider,
+          hasBaseUrl: !!match?.baseUrl,
+          hasApiKey: !!match?.apiKey
         });
-        return {
-          baseUrl: match.baseUrl,
-          apiKey: match.apiKey,
-          api: (match.api === 'openai' ? 'openai' : 'anthropic-messages'),
-          modelId,
-          resolvedFrom: 'openclaw-config'
-        };
+      } catch (err: unknown) {
+        this.logger.warn('Failed to read/parse openclaw.json', {
+          configPath,
+          error: err instanceof Error ? err.message : String(err)
+        });
       }
-    } catch (err: unknown) {
-      this.logger.warn('Failed to read openclaw.json', {
-        configPath,
-        error: err instanceof Error ? err.message : String(err)
-      });
     }
 
     return null;
+  }
+
+  /**
+   * Returns candidate paths for openclaw.json, ordered by preference.
+   */
+  private getConfigCandidatePaths(): string[] {
+    return [
+      join(this.workspaceDir, '..', 'openclaw.json'),
+      join(this.workspaceDir, 'openclaw.json')
+    ];
   }
 }
 

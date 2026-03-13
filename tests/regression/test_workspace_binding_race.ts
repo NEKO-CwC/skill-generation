@@ -49,11 +49,10 @@ describe('Regression: Workspace binding race condition', () => {
     expect(plugin.paths.patchesDir).toBe(join(tempRoot, '.skill-patches'));
   });
 
-  it('reviewRunner.refreshRuntimeContext is called and clears cache on workspace bind', () => {
+  it('reviewRunner.refreshRuntimeContext is called with resolver on workspace bind', () => {
     const config = getDefaultConfig();
     const plugin = new SkillEvolutionPlugin(config);
 
-    // The default runner is LLMReviewRunner which implements RefreshableReviewRunner
     const runner = plugin.reviewRunner as LLMReviewRunner;
     const refreshSpy = vi.spyOn(runner, 'refreshRuntimeContext');
 
@@ -62,9 +61,10 @@ describe('Regression: Workspace binding race condition', () => {
     expect(refreshSpy).toHaveBeenCalledOnce();
     const callArgs = refreshSpy.mock.calls[0][0];
     expect(callArgs.paths).toEqual(plugin.paths);
+    // Resolver should be a LlmRuntimeResolver instance (not null)
     expect(callArgs.llmRuntimeResolver).toBeDefined();
+    expect(typeof callArgs.llmRuntimeResolver!.resolve).toBe('function');
 
-    // After refresh, runner paths should match plugin paths
     expect(runner.paths?.workspaceDir).toBe(tempRoot);
   });
 

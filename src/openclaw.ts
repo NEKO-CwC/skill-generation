@@ -8,7 +8,6 @@ import type {
   PluginHookAgentContext,
   PluginHookMessageContext,
   PluginHookToolContext,
-  ProviderConfigSource,
   SessionEndEvent,
   SkillEvolutionConfig
 } from './shared/types.js';
@@ -67,15 +66,6 @@ export default function register(api: OpenClawPluginApi): void {
 
   const plugin = new SkillEvolutionPlugin(config);
   logger.info('Skill Evolution plugin registered', { enabled: plugin.config.enabled });
-
-  // Extract provider config from host and inject into plugin for LLM resolution
-  const providerConfigSource = extractProviderConfigSource(rawConfig ?? {});
-  if (providerConfigSource) {
-    plugin.setProviderConfigSource(providerConfigSource);
-    logger.debug('Injected provider config source', {
-      providers: Object.keys(providerConfigSource.providers ?? {})
-    });
-  }
 
   if (!plugin.config.enabled) {
     logger.info('Plugin is disabled by config, skipping hook registration');
@@ -164,25 +154,4 @@ export default function register(api: OpenClawPluginApi): void {
   );
 
   logger.info('Note: if allowPromptInjection is disabled in OpenClaw config (plugins.entries.skill-evolution.hooks.allowPromptInjection=false), overlay injection via before_prompt_build will be silently ignored by OpenClaw. The plugin will still collect feedback and run reviews, but session overlays will not appear in prompts.');
-}
-
-/**
- * Extracts provider configuration from the raw plugin config or host config.
- * Looks for models.providers in the config object.
- */
-function extractProviderConfigSource(rawConfig: Record<string, unknown>): ProviderConfigSource | null {
-  // Try direct models.providers path
-  const models = rawConfig.models as Record<string, unknown> | undefined;
-  if (models?.providers && typeof models.providers === 'object') {
-    return { providers: models.providers as ProviderConfigSource['providers'] };
-  }
-
-  // Try nested skillEvolution.models.providers
-  const skillEvolution = rawConfig.skillEvolution as Record<string, unknown> | undefined;
-  const seModels = skillEvolution?.models as Record<string, unknown> | undefined;
-  if (seModels?.providers && typeof seModels.providers === 'object') {
-    return { providers: seModels.providers as ProviderConfigSource['providers'] };
-  }
-
-  return null;
 }

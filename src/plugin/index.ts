@@ -10,7 +10,6 @@ import type {
   OverlayStore,
   PatchGenerator,
   PluginHooks,
-  ProviderConfigSource,
   RefreshableReviewRunner,
   ReviewRunner,
   RollbackManager,
@@ -75,8 +74,6 @@ export class SkillEvolutionPlugin implements PluginHooks {
 
   private workspaceBound: boolean;
 
-  private providerConfigSource: ProviderConfigSource | null = null;
-
   /**
    * Initializes plugin dependencies with defaults for v1 skeleton.
    */
@@ -109,14 +106,6 @@ export class SkillEvolutionPlugin implements PluginHooks {
     return this.workspaceBound;
   }
 
-  /**
-   * Sets the provider config source for LLM resolution.
-   * Called by the openclaw adapter to inject host-provided provider configuration.
-   */
-  public setProviderConfigSource(source: ProviderConfigSource): void {
-    this.providerConfigSource = source;
-  }
-
   public ensureWorkspaceDir(workspaceDir: string): void {
     if (this.workspaceBound) {
       this.logger.debug('Workspace already bound, skipping', { existingWorkspace: this.paths.workspaceDir, requested: workspaceDir });
@@ -131,7 +120,6 @@ export class SkillEvolutionPlugin implements PluginHooks {
     if (isRefreshableReviewRunner(this.reviewRunner)) {
       const resolver = new LlmRuntimeResolver(
         this.paths.workspaceDir,
-        this.providerConfigSource,
         this.logger
       );
       this.reviewRunner.refreshRuntimeContext({

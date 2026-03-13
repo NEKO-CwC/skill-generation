@@ -128,17 +128,16 @@ export interface RefreshableReviewRunner extends ReviewRunner {
 
 /**
  * Resolves LLM provider configuration from available sources.
- * Commit A defines the interface; Commit B provides the concrete implementation.
  */
 export interface LlmResolver {
   resolve(model: string): ResolvedProvider;
 }
 
 /**
- * Narrow view of provider configuration injected from the host environment.
- * Avoids passing the entire openclaw config into the resolver.
+ * Parsed provider map from openclaw.json file.
+ * Used internally by the resolver for file-based fallback.
  */
-export interface ProviderConfigSource {
+export interface ParsedProvidersConfig {
   providers?: Record<string, {
     baseUrl: string;
     apiKey: string;
@@ -154,7 +153,7 @@ export interface ResolvedProvider {
   apiKey: string;
   api: 'openai' | 'anthropic-messages';
   modelId: string;
-  resolvedFrom: 'injected' | 'env' | 'openclaw-config' | 'none';
+  resolvedFrom: 'env' | 'openclaw-config';
 }
 
 export interface PatchGenerator {
