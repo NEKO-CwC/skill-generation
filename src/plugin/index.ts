@@ -62,7 +62,7 @@ export class SkillEvolutionPlugin implements PluginHooks {
 
   public readonly feedbackClassifier: FeedbackClassifier;
 
-  public readonly reviewRunner: ReviewRunner;
+  public reviewRunner: ReviewRunner;
 
   public readonly patchGenerator: PatchGenerator;
 
@@ -198,6 +198,16 @@ export class SkillEvolutionPlugin implements PluginHooks {
 
   public setAgentId(agentId: string): void {
     this.agentId = agentId;
+  }
+
+  public isWorkspaceBound(): boolean {
+    return this.workspaceBound;
+  }
+
+  public setLlmClient(llmClient: LlmClient): void {
+    const deterministicFallback = new DeterministicReviewRunner(this.config);
+    this.reviewRunner = new LlmReviewRunner(this.config, llmClient, deterministicFallback);
+    this.logger.info('LLM client injected, review runner rebuilt');
   }
 
   public setSessionSkillKey(sessionId: string, skillKey: string): void {

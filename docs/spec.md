@@ -138,8 +138,8 @@ Severity is assessed by counting **both** `tool_error` and `user_correction` eve
    - If `requireHumanMerge` is true: The report is saved, and any mergeable document is queued (it is NOT written to the target file).
    - If `requireHumanMerge` is false: The report is saved, and the mergeable document (if not null) is applied automatically.
 6. **Target-Aware Merge**:
-   - **Skill**: Updates `skills/<key>/SKILL.md`.
-   - **Builtin**: Updates `.skill-global/tools/<key>.md`.
+   - **Skill**: Updates `skills/{key}/SKILL.md`.
+   - **Builtin**: Updates `.skill-global/tools/{key}.md`.
    - **Global**: Updates `.skill-global/DEFAULT_SKILL.md`.
    - **Unresolved**: Report saved only; no automatic merge target for the document.
 7. **Finalization**: Update the target file, save a backup of the previous version, prune rollback chain to cap.

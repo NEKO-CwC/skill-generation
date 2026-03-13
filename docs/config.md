@@ -6,7 +6,7 @@ The Skill Evolution plugin is configured through OpenClaw's plugin config at `pl
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `enabled` | boolean | `true` | Master switch. When `false`, no hooks are registered. |
+| `enabled` | boolean | `true` | **Master switch.** When `false`, `register()` returns immediately -- no hooks are registered, no background services are created, and the plugin produces no side effects. |
 
 ## `review`
 
@@ -130,6 +130,8 @@ Controls which feedback signals the plugin responds to.
 | `triggers.onUserCorrection` | boolean | `true` | Detect user corrections via `message_received`. |
 | `triggers.onSessionEndReview` | boolean | `true` | Run review pipeline at session end. |
 | `triggers.onPositiveFeedback` | boolean | `true` | Capture positive feedback signals. |
+
+> **Positive feedback scope:** When `triggers.onPositiveFeedback` is `true`, positive signals are collected and their count appears in review justification text. However, positive feedback alone does **not** trigger patch generation. The deterministic review runner requires at least one error, correction, or overlay to recommend a modification (`totalErrors > 0 || correctionCount > 0 || overlayCount > 0`). Sessions with only positive feedback will produce `isModificationRecommended: false`.
 
 ## `queue`
 

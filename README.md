@@ -23,6 +23,8 @@ before_prompt_build → OverlayStore.listBySession → OverlayInjector → augme
 
 ### Background chain (review service)
 
+> **Lazy initialization:** The review queue and worker are **not** created at plugin registration time. They are initialized only after `captureWorkspaceDir()` resolves a valid `workspaceDir` from hook context for the first time. If the workspace is never resolved (e.g., the host never provides `ctx.workspaceDir`), real-time hooks still function (overlays fall back to `process.cwd()`), but the background review queue does not start.
+
 When a session ends, the plugin enqueues review tasks that a background worker processes asynchronously:
 
 ```
@@ -43,10 +45,10 @@ Feedback is routed to one of four target kinds based on the tool name and skill 
 
 | Kind | Key example | Storage path | Merge mode |
 |------|-------------|-------------|------------|
-| `skill` | `my-deploy-skill` | `skills/<key>/SKILL.md` | `skill-doc` |
-| `builtin` | `Bash`, `Read`, `Write` | `.skill-global/tools/<tool>.md` | `global-doc` |
+| `skill` | `my-deploy-skill` | `skills/{key}/SKILL.md` | `skill-doc` |
+| `builtin` | `Bash`, `Read`, `Write` | `.skill-global/tools/{tool}.md` | `global-doc` |
 | `global` | `default` | `.skill-global/DEFAULT_SKILL.md` | `global-doc` |
-| `unresolved` | `unknown-tool` | `.skill-patches/<key>/` (queue only) | `queue-only` |
+| `unresolved` | `unknown-tool` | `.skill-patches/{key}/` (queue only) | `queue-only` |
 
 - Builtin and global learnings go to `.skill-global/`, not `skills/`
 - Unresolved targets are queued for human review but never auto-merged
@@ -62,6 +64,8 @@ review:
 ```
 
 Rule-based heuristics evaluate accumulated evidence (error count, correction count, overlay count). No external dependencies required. Risk level is computed from combined error and correction counts.
+
+> **Note on positive feedback:** Positive feedback (`positive_feedback` events) is collected, counted, and included in review justification text (e.g., "3 positive signals"). However, positive feedback **alone does not trigger patch generation**. The deterministic reviewer requires at least one of: `totalErrors > 0`, `correctionCount > 0`, or `overlayCount > 0`. A session with only positive signals will produce a review with `isModificationRecommended: false`.
 
 ### LLM review
 
@@ -83,6 +87,8 @@ An LLM evaluates session evidence and produces a candidate document. If the LLM 
 ## Configuration
 
 Config is provided through OpenClaw's plugin config mechanism at `plugins.entries.skill-evolution.config`:
+
+> **`enabled: false` is a true master switch.** When disabled, `register()` returns immediately -- no hooks are registered, no services are created, no background workers start, and no side effects occur. The plugin is completely inert.
 
 ```yaml
 skillEvolution:

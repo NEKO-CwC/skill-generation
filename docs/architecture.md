@@ -313,7 +313,7 @@ export interface PluginHooks {
 
 /** 
  * Manages session-scoped ephemeral skill modifications.
- * Storage path convention: `.skill-overlays/<session-id>/<skill-key>.md`
+ * Storage path convention: `.skill-overlays/{session-id}/{skill-key}.md`
  */
 export interface OverlayStore {
   /** Creates or overwrites an overlay for a session/skill. */
@@ -425,7 +425,7 @@ export interface PendingHintStore {
 
 /**
  * Maintains a capped chain of historical skill versions for safety.
- * Storage path convention: `.skill-backups/<skill-key>/<version-id>.md`
+ * Storage path convention: `.skill-backups/{skill-key}/{version-id}.md`
  */
 export interface RollbackManager {
   /** Creates a snapshot of the current skill content before modification. */
@@ -494,10 +494,13 @@ This resolution is applied identically to all five hooks (`before_prompt_build`,
 
 The plugin does **not** read `workspaceDir` from the plugin config schema. Instead, workspace directory is resolved at runtime from OpenClaw hook context:
 
-1. **Initialization**: Plugin starts with `process.cwd()` as the workspace directory.
-2. **First hook invocation**: `captureWorkspaceDir()` checks each hook context for `ctx.workspaceDir`. If present, it calls `plugin.ensureWorkspaceDir(workspaceDir)`.
-3. **Binding**: `ensureWorkspaceDir()` is idempotent, so once bound, subsequent calls are no-ops. On first bind, it reconstructs all path-dependent modules (`OverlayStore`, `FeedbackCollector`, `RollbackManager`, `MergeManager`) with workspace-relative paths.
-4. **Rationale**: OpenClaw determines the actual workspace at runtime; hardcoding it in config would create a mismatch when the plugin is used across different projects.
+1. **Registration**: `register()` parses config and creates the `SkillEvolutionPlugin` instance. If `enabled=false`, it returns immediately (no hooks, no services). Otherwise, hooks are registered but the background review queue/worker are **not** created yet.
+2. **Hook invocations begin**: Each hook call runs `captureWorkspaceDir()`, which checks `ctx.workspaceDir`.
+3. **First workspace binding**: On the first hook invocation that provides a valid `ctx.workspaceDir`, `captureWorkspaceDir()` calls `plugin.ensureWorkspaceDir(dir)`. This reconstructs all path-dependent modules (`OverlayStore`, `FeedbackCollector`, `RollbackManager`, `MergeManager`) with workspace-relative paths. It then calls `initBackgroundService()`, which creates the `ReviewQueueImpl` and `ReviewWorkerImpl` and registers the worker via `api.registerService()`.
+4. **Subsequent calls**: `ensureWorkspaceDir()` is idempotent; once bound, subsequent calls are no-ops. `plugin.isWorkspaceBound()` returns `true` from this point forward.
+5. **No workspace provided**: If the host never provides `ctx.workspaceDir`, real-time hooks still function (overlays use `process.cwd()` fallback) but the background review queue never starts and `session_end` enqueue calls are skipped.
+
+**Lifecycle summary:** `register → hooks begin → captureWorkspaceDir fires → lazy service init (queue + worker)`
 
 ## 9. Feedback Classification & Severity
 
@@ -541,10 +544,10 @@ Target resolution routes feedback and evolution signals to the correct shared do
 ### Storage and Merge
 | Kind | Storage Key | Merge Mode | Path |
 |------|-------------|------------|------|
-| skill | `<skill-key>` | `skill-doc` | `skills/<skill-key>/SKILL.md` |
-| builtin | `builtin-<tool>` | `global-doc` | `.skill-global/tools/<tool>.md` |
+| skill | `{skill-key}` | `skill-doc` | `skills/{skill-key}/SKILL.md` |
+| builtin | `builtin-{tool}` | `global-doc` | `.skill-global/tools/{tool}.md` |
 | global | `global-default` | `global-doc` | `.skill-global/DEFAULT_SKILL.md` |
-| unresolved | `unresolved-<tool>` | `queue-only` | `.skill-patches/unresolved-<tool>/` (report only) |
+| unresolved | `unresolved-{tool}` | `queue-only` | `.skill-patches/unresolved-{tool}/` (report only) |
 
 ## 11. Noise Filtering
 

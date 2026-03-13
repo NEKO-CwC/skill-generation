@@ -36,12 +36,55 @@ function resolveSessionId(ctx: Record<string, unknown>): string {
 
 /**
  * Captures workspace directory from hook context if available.
- * Used to bind the plugin to the real workspace on first hook invocation.
+ * On first successful capture, also initializes background review service.
  */
-function captureWorkspaceDir(plugin: SkillEvolutionPlugin, ctx: Record<string, unknown>): void {
+function captureWorkspaceDir(
+  plugin: SkillEvolutionPlugin,
+  ctx: Record<string, unknown>,
+  api: OpenClawPluginApi,
+  llmClient: LlmClient | undefined,
+  serviceRegistered: { value: boolean }
+): void {
   if (typeof ctx.workspaceDir === 'string' && ctx.workspaceDir) {
+    const wasUnbound = !plugin.isWorkspaceBound();
     plugin.ensureWorkspaceDir(ctx.workspaceDir);
+
+    // Initialize background service on first workspace binding
+    if (wasUnbound && plugin.isWorkspaceBound() && !serviceRegistered.value) {
+      initBackgroundService(plugin, api, llmClient);
+      serviceRegistered.value = true;
+    }
   }
+}
+
+/**
+ * Creates and registers the background review queue + worker after workspace is known.
+ */
+function initBackgroundService(
+  plugin: SkillEvolutionPlugin,
+  api: OpenClawPluginApi,
+  _llmClient: LlmClient | undefined
+): void {
+  const logger = new ConsoleLogger('openclaw.adapter');
+
+  const reviewQueue = new ReviewQueueImpl(plugin.paths.reviewQueueDir, plugin.paths.reviewQueueFailedDir);
+  plugin.reviewQueue = reviewQueue;
+
+  const worker = new ReviewWorkerImpl({
+    queue: reviewQueue,
+    reviewRunner: plugin.reviewRunner,
+    patchGenerator: plugin.patchGenerator,
+    mergeManager: plugin.mergeManager,
+    paths: plugin.paths,
+    config: plugin.config
+  });
+
+  api.registerService(worker);
+
+  logger.info('Background review service initialized after workspace binding', {
+    workspaceDir: plugin.paths.workspaceDir,
+    reviewQueueDir: plugin.paths.reviewQueueDir
+  });
 }
 
 /**
@@ -70,35 +113,36 @@ export default function register(api: OpenClawPluginApi): void {
     config = undefined;
   }
 
-  // Build LLM client if engine=llm and mode!=disabled
-  let llmClient: LlmClient | undefined;
-  if (config && config.review.engine === 'llm' && config.llm.mode !== 'disabled') {
-    const authResolver = new AuthResolverImpl();
-    llmClient = new LlmClientImpl(config, authResolver);
-  }
-
-  const plugin = new SkillEvolutionPlugin(config, undefined, llmClient);
+  const plugin = new SkillEvolutionPlugin(config);
   logger.info('Skill Evolution plugin registered', { enabled: plugin.config.enabled });
 
-  // Build review queue with resolved paths
-  const reviewQueue = new ReviewQueueImpl(plugin.paths.reviewQueueDir, plugin.paths.reviewQueueFailedDir);
-  plugin.reviewQueue = reviewQueue;
-
-  // Build and register review worker
-  const worker = new ReviewWorkerImpl({
-    queue: reviewQueue,
-    reviewRunner: plugin.reviewRunner,
-    patchGenerator: plugin.patchGenerator,
-    mergeManager: plugin.mergeManager,
-    paths: plugin.paths,
-    config: plugin.config
-  });
-
-  api.registerService(worker);
-
+  // P0-2: enabled=false is a true master switch — no hooks, no services, no side effects
   if (!plugin.config.enabled) {
-    logger.info('Plugin is disabled by config, skipping hook registration');
+    logger.info('Plugin is disabled by config, skipping all registration');
     return;
+  }
+
+  // Build LLM client if engine=llm and mode!=disabled (used later when background service initializes)
+  let llmClient: LlmClient | undefined;
+  if (plugin.config.review.engine === 'llm' && plugin.config.llm.mode !== 'disabled') {
+    const authResolver = new AuthResolverImpl();
+    llmClient = new LlmClientImpl(plugin.config, authResolver);
+  }
+
+  // Pass llmClient to the review runner now (it's needed for both sync and async paths)
+  if (llmClient) {
+    plugin.setLlmClient(llmClient);
+  }
+
+  // Track whether background service has been registered.
+  // It will be initialized lazily on first workspace binding.
+  const serviceRegistered = { value: false };
+
+  // If plugin was constructed with an explicit workspace (e.g. in tests),
+  // initialize background service immediately.
+  if (plugin.isWorkspaceBound()) {
+    initBackgroundService(plugin, api, llmClient);
+    serviceRegistered.value = true;
   }
 
   api.on(
@@ -108,7 +152,7 @@ export default function register(api: OpenClawPluginApi): void {
       ctx: PluginHookAgentContext
     ): Promise<BeforePromptBuildResult | undefined> => {
       const ctxRecord = ctx as unknown as Record<string, unknown>;
-      captureWorkspaceDir(plugin, ctxRecord);
+      captureWorkspaceDir(plugin, ctxRecord, api, llmClient, serviceRegistered);
       captureAgentId(plugin, ctxRecord);
       const sessionId = resolveSessionId(ctxRecord);
       const eventRecord = event as unknown as Record<string, unknown>;
@@ -137,7 +181,7 @@ export default function register(api: OpenClawPluginApi): void {
     'after_tool_call',
     async (event: AfterToolCallEvent, ctx: PluginHookToolContext): Promise<void> => {
       const ctxRecord = ctx as unknown as Record<string, unknown>;
-      captureWorkspaceDir(plugin, ctxRecord);
+      captureWorkspaceDir(plugin, ctxRecord, api, llmClient, serviceRegistered);
       captureAgentId(plugin, ctxRecord);
       const sessionId = resolveSessionId(ctxRecord);
       const toolName = event.toolName;
@@ -153,7 +197,7 @@ export default function register(api: OpenClawPluginApi): void {
     'message_received',
     async (event: MessageReceivedEvent, ctx: PluginHookMessageContext): Promise<void> => {
       const ctxRecord = ctx as unknown as Record<string, unknown>;
-      captureWorkspaceDir(plugin, ctxRecord);
+      captureWorkspaceDir(plugin, ctxRecord, api, llmClient, serviceRegistered);
       captureAgentId(plugin, ctxRecord);
       const sessionId = resolveSessionId(ctxRecord);
       const message = event.content;
@@ -167,7 +211,7 @@ export default function register(api: OpenClawPluginApi): void {
     'agent_end',
     async (_event: AgentEndEvent, ctx: PluginHookAgentContext): Promise<void> => {
       const ctxRecord = ctx as unknown as Record<string, unknown>;
-      captureWorkspaceDir(plugin, ctxRecord);
+      captureWorkspaceDir(plugin, ctxRecord, api, llmClient, serviceRegistered);
       captureAgentId(plugin, ctxRecord);
       const sessionId = resolveSessionId(ctxRecord);
       await plugin.agent_end(sessionId);
@@ -179,7 +223,7 @@ export default function register(api: OpenClawPluginApi): void {
     'session_end',
     async (_event: SessionEndEvent, ctx: PluginHookAgentContext): Promise<void> => {
       const ctxRecord = ctx as unknown as Record<string, unknown>;
-      captureWorkspaceDir(plugin, ctxRecord);
+      captureWorkspaceDir(plugin, ctxRecord, api, llmClient, serviceRegistered);
       captureAgentId(plugin, ctxRecord);
       const sessionId = resolveSessionId(ctxRecord);
       await plugin.session_end(sessionId);
