@@ -71,12 +71,14 @@ export class AuthResolutionError extends Error {
 export class LlmCallError extends Error {
   public readonly statusCode?: number;
   public readonly provider?: string;
+  public readonly resolvedUrl?: string;
 
-  public constructor(message: string, statusCode?: number, provider?: string) {
+  public constructor(message: string, statusCode?: number, provider?: string, resolvedUrl?: string) {
     super(message);
     this.name = 'LlmCallError';
     this.statusCode = statusCode;
     this.provider = provider;
+    this.resolvedUrl = resolvedUrl;
   }
 }
 

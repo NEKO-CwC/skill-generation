@@ -83,6 +83,38 @@ describe('review/llm_client_impl - LlmClientImpl', () => {
     expect(result).toBe('OpenAI response');
   });
 
+  it('completes full chain with mock fetch for openrouter', async () => {
+    const resolved = makeResolved({ provider: 'openrouter' });
+    const authResolver = makeAuthResolver(resolved);
+    const config = makeConfig({
+      provider: 'openrouter',
+      openrouterSiteUrl: 'https://myapp.example.com',
+      openrouterAppName: 'TestApp'
+    });
+
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(
+      makeOkResponse({
+        choices: [{ message: { role: 'assistant', content: 'OpenRouter response' } }]
+      })
+    ));
+
+    const client = new LlmClientImpl(config, authResolver);
+    const result = await client.complete('Hello', 'Be helpful');
+
+    expect(result).toBe('OpenRouter response');
+
+    const fetchCall = vi.mocked(globalThis.fetch).mock.calls[0];
+    expect(fetchCall[0]).toBe('https://openrouter.ai/api/v1/chat/completions');
+    const opts = fetchCall[1] as RequestInit;
+    const headers = opts.headers as Record<string, string>;
+    expect(headers['Authorization']).toBe('Bearer sk-test-key-abc');
+    expect(headers['HTTP-Referer']).toBe('https://myapp.example.com');
+    expect(headers['X-Title']).toBe('TestApp');
+
+    const body = JSON.parse(opts.body as string);
+    expect(body.model).toBe('openai/gpt-4o');
+  });
+
   it('throws LlmCallError when auth resolves null', async () => {
     const authResolver = makeAuthResolver(null);
     const config = makeConfig();
@@ -204,6 +236,48 @@ describe('review/llm_client_impl - LlmClientImpl', () => {
       const llmErr = error as LlmCallError;
       expect(llmErr.message).not.toContain('sk-super-secret-never-leak');
       expect(String(llmErr)).not.toContain('sk-super-secret-never-leak');
+    }
+  });
+
+  it('7.5: LlmCallError includes resolvedUrl on HTTP failure', async () => {
+    const resolved = makeResolved({ provider: 'openrouter' });
+    const authResolver = makeAuthResolver(resolved);
+    const config = makeConfig({ provider: 'openrouter' });
+
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(
+      new Response('Forbidden', { status: 403, statusText: 'Forbidden' })
+    ));
+
+    const client = new LlmClientImpl(config, authResolver);
+
+    try {
+      await client.complete('Hello');
+      expect.fail('Should have thrown');
+    } catch (error) {
+      expect(error).toBeInstanceOf(LlmCallError);
+      const llmErr = error as LlmCallError;
+      expect(llmErr.provider).toBe('openrouter');
+      expect(llmErr.statusCode).toBe(403);
+      expect(llmErr.resolvedUrl).toBe('https://openrouter.ai/api/v1/chat/completions');
+    }
+  });
+
+  it('7.5: LlmCallError includes resolvedUrl on fetch failure', async () => {
+    const resolved = makeResolved({ provider: 'anthropic' });
+    const authResolver = makeAuthResolver(resolved);
+    const config = makeConfig({ provider: 'anthropic' });
+
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new TypeError('Network error')));
+
+    const client = new LlmClientImpl(config, authResolver);
+
+    try {
+      await client.complete('Hello');
+      expect.fail('Should have thrown');
+    } catch (error) {
+      expect(error).toBeInstanceOf(LlmCallError);
+      const llmErr = error as LlmCallError;
+      expect(llmErr.resolvedUrl).toBe('https://api.anthropic.com/v1/messages');
     }
   });
 });

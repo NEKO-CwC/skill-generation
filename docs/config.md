@@ -25,7 +25,7 @@ Controls LLM auth resolution and client configuration. Only relevant when `revie
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `llm.mode` | `'disabled'` \| `'inherit-or-fallback'` \| `'explicit'` | `'disabled'` | Auth resolution strategy. See "Auth resolution modes" below. |
-| `llm.provider` | `'anthropic'` \| `'openai-compatible'` \| `'custom'` | `'anthropic'` | LLM provider. Determines which API format is used for completions. |
+| `llm.provider` | `'anthropic'` \| `'openai-compatible'` \| `'openrouter'` \| `'custom'` | `'anthropic'` | LLM provider. Determines which API format and default URLs are used for completions. |
 | `llm.authProfileRef` | string \| null | `null` | Profile ID referencing an entry in `~/.openclaw/agents/<agentId>/agent/auth-profiles.json`. Used by `inherit-or-fallback` and `explicit` modes to look up stored credentials. |
 | `llm.keyRef` | SecretRef \| null | `null` | Direct secret reference for API key resolution. See "SecretRef format" below. |
 | `llm.allowExecSecretRef` | boolean | `false` | Safety gate. Must be `true` for `keyRef.source=exec` to be accepted. Prevents accidental command execution. |
@@ -34,6 +34,10 @@ Controls LLM auth resolution and client configuration. Only relevant when `revie
 | `llm.modelOverride` | string \| null | `null` | Override the model ID used for review completions. |
 | `llm.thinkingOverride` | boolean \| null | `null` | Override whether the LLM uses extended thinking. |
 | `llm.baseUrlOverride` | string \| null | `null` | Override the base URL for the LLM API endpoint. |
+| `llm.chatCompletionsPathOverride` | string \| null | `null` | Override the chat completions endpoint path (e.g. `/v1/chat/completions`). When null, uses the provider default. |
+| `llm.messagesPathOverride` | string \| null | `null` | Override the Anthropic messages endpoint path (e.g. `/v1/messages`). When null, uses the provider default. |
+| `llm.openrouterSiteUrl` | string \| null | `null` | Site URL sent as `HTTP-Referer` header for OpenRouter requests. Optional but recommended for OpenRouter analytics. |
+| `llm.openrouterAppName` | string \| null | `null` | App name sent as `X-Title` header for OpenRouter requests. Optional but recommended for OpenRouter analytics. |
 
 ### Auth resolution modes
 
@@ -100,6 +104,37 @@ keyRef:
   args: ["read", "op://vault/anthropic/api-key"]
 ```
 
+### OpenRouter configuration
+
+[OpenRouter](https://openrouter.ai/) provides access to many models through a single API. The plugin has first-class support for OpenRouter with correct URL handling (no double `/v1` issue).
+
+Minimal setup:
+
+```yaml
+llm:
+  provider: openrouter
+  keyRef:
+    source: env
+    id: OPENROUTER_API_KEY
+```
+
+With optional analytics headers and model override:
+
+```yaml
+llm:
+  provider: openrouter
+  modelOverride: anthropic/claude-sonnet-4-20250514
+  openrouterSiteUrl: https://myapp.example.com
+  openrouterAppName: My Skill Evolution
+  keyRef:
+    source: env
+    id: OPENROUTER_API_KEY
+```
+
+**URL construction:** The default base URL is `https://openrouter.ai/api/v1` and the default path is `/chat/completions`, producing `https://openrouter.ai/api/v1/chat/completions`. You do not need to set `baseUrlOverride` — if you do set it to `https://openrouter.ai/api/v1`, it still works correctly with no double `/v1`.
+
+**Gateway fallback:** If `allowGatewayFallback=true` and `OPENROUTER_API_KEY` is set in the environment, the plugin will automatically use OpenRouter. Priority order: `ANTHROPIC_API_KEY` > `OPENROUTER_API_KEY` > `OPENAI_API_KEY`.
+
 ## `merge`
 
 Controls merge policy and rollback behavior.
@@ -159,7 +194,7 @@ The resolved auth is represented as:
 ```typescript
 interface ResolvedAuth {
   apiKey: string;
-  provider: 'anthropic' | 'openai-compatible' | 'custom';
+  provider: 'anthropic' | 'openai-compatible' | 'openrouter' | 'custom';
   baseUrl?: string;
   profileId?: string;
   source: 'authProfileRef' | 'keyRef' | 'agent-auth-profile' | 'gateway-fallback';

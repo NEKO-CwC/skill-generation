@@ -76,6 +76,15 @@ review:
 
 An LLM evaluates session evidence and produces a candidate document. If the LLM client is unavailable or auth resolution returns null, the plugin automatically falls back to deterministic review. LLM review requires configuring auth via the `llm` section.
 
+### LLM providers
+
+| `llm.provider` | Default base URL | Auth | Response format |
+|----------------|-----------------|------|-----------------|
+| `anthropic` (default) | `https://api.anthropic.com` | `x-api-key` | Anthropic Messages |
+| `openai-compatible` | `https://api.openai.com` | `Bearer` | OpenAI Chat Completions |
+| `openrouter` | `https://openrouter.ai/api/v1` | `Bearer` | OpenAI Chat Completions |
+| `custom` | (requires `baseUrlOverride`) | `Bearer` | OpenAI Chat Completions |
+
 ### LLM auth modes
 
 | `llm.mode` | Behavior |

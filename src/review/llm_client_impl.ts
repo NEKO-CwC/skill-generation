@@ -35,12 +35,14 @@ export class LlmClientImpl implements LlmClient {
     }
 
     // 2. Build request
-    const { url, headers, body } = this.providerAdapter.buildRequest(prompt, systemPrompt, resolved);
+    const { url, headers, body } = this.providerAdapter.buildRequest(
+      prompt, systemPrompt, resolved, this.config
+    );
 
     this.logger.info('Sending LLM request', {
       provider: resolved.provider,
       source: resolved.source,
-      url
+      resolvedUrl: url
     });
 
     // 3. Fetch with timeout
@@ -61,14 +63,16 @@ export class LlmClientImpl implements LlmClient {
         throw new LlmCallError(
           `Request timed out after ${REQUEST_TIMEOUT_MS}ms`,
           undefined,
-          resolved.provider
+          resolved.provider,
+          url
         );
       }
       const message = error instanceof Error ? error.message : String(error);
       throw new LlmCallError(
         `Fetch failed: ${message}`,
         undefined,
-        resolved.provider
+        resolved.provider,
+        url
       );
     } finally {
       clearTimeout(timeoutId);
@@ -79,7 +83,8 @@ export class LlmClientImpl implements LlmClient {
       throw new LlmCallError(
         `HTTP ${response.status}: ${response.statusText}`,
         response.status,
-        resolved.provider
+        resolved.provider,
+        url
       );
     }
 
@@ -92,7 +97,8 @@ export class LlmClientImpl implements LlmClient {
       throw new LlmCallError(
         `Failed to read response body: ${message}`,
         response.status,
-        resolved.provider
+        resolved.provider,
+        url
       );
     }
 
@@ -104,7 +110,8 @@ export class LlmClientImpl implements LlmClient {
       throw new LlmCallError(
         `Failed to parse response: ${message}`,
         response.status,
-        resolved.provider
+        resolved.provider,
+        url
       );
     }
 

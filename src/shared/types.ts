@@ -25,8 +25,12 @@ export interface SkillEvolutionConfig {
     modelOverride: string | null;
     thinkingOverride: boolean | null;
     mode: 'inherit-or-fallback' | 'explicit' | 'disabled';
-    provider: 'anthropic' | 'openai-compatible' | 'custom';
+    provider: LlmProviderType;
     baseUrlOverride: string | null;
+    chatCompletionsPathOverride: string | null;
+    messagesPathOverride: string | null;
+    openrouterSiteUrl: string | null;
+    openrouterAppName: string | null;
     authProfileRef: string | null;
     keyRef: SecretRef | null;
     allowExecSecretRef: boolean;
@@ -132,6 +136,10 @@ export interface PendingHint {
 
 export type NoiseDisposition = 'ignore' | 'low-signal' | 'normal';
 
+// ── LLM Provider Type ─────────────────────────────────────────────
+
+export type LlmProviderType = 'anthropic' | 'openai-compatible' | 'openrouter' | 'custom';
+
 // ── Secret / Auth Types ───────────────────────────────────────────
 
 export interface SecretRef {
@@ -142,7 +150,7 @@ export interface SecretRef {
 
 export interface ResolvedAuth {
   apiKey: string;
-  provider: 'anthropic' | 'openai-compatible' | 'custom';
+  provider: LlmProviderType;
   baseUrl?: string;
   profileId?: string;
   source: 'authProfileRef' | 'keyRef' | 'agent-auth-profile' | 'gateway-fallback';

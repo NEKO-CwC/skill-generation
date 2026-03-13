@@ -21,6 +21,7 @@ interface AuthProfile {
 
 const GATEWAY_ENV_MAP: Array<{ envVar: string; provider: ResolvedAuth['provider'] }> = [
   { envVar: 'ANTHROPIC_API_KEY', provider: 'anthropic' },
+  { envVar: 'OPENROUTER_API_KEY', provider: 'openrouter' },
   { envVar: 'OPENAI_API_KEY', provider: 'openai-compatible' }
 ];
 

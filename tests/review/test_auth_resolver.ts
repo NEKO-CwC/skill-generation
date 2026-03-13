@@ -124,6 +124,57 @@ describe('review/auth_resolver - AuthResolverImpl', () => {
     expect(result!.source).toBe('gateway-fallback');
   });
 
+  it('gateway fallback works when allowed and OPENROUTER_API_KEY is set', async () => {
+    process.env['OPENROUTER_API_KEY'] = 'sk-gateway-openrouter';
+    const config = makeConfig({
+      authProfileRef: null,
+      keyRef: null,
+      allowGatewayFallback: true
+    });
+
+    const resolver = new AuthResolverImpl();
+    const result = await resolver.resolve(config);
+
+    expect(result).not.toBeNull();
+    expect(result!.apiKey).toBe('sk-gateway-openrouter');
+    expect(result!.provider).toBe('openrouter');
+    expect(result!.source).toBe('gateway-fallback');
+  });
+
+  it('gateway fallback prefers ANTHROPIC_API_KEY over OPENROUTER_API_KEY', async () => {
+    process.env['ANTHROPIC_API_KEY'] = 'sk-gateway-anthro';
+    process.env['OPENROUTER_API_KEY'] = 'sk-gateway-openrouter';
+    const config = makeConfig({
+      authProfileRef: null,
+      keyRef: null,
+      allowGatewayFallback: true
+    });
+
+    const resolver = new AuthResolverImpl();
+    const result = await resolver.resolve(config);
+
+    expect(result).not.toBeNull();
+    expect(result!.apiKey).toBe('sk-gateway-anthro');
+    expect(result!.provider).toBe('anthropic');
+  });
+
+  it('gateway fallback uses OPENROUTER_API_KEY before OPENAI_API_KEY', async () => {
+    process.env['OPENROUTER_API_KEY'] = 'sk-gateway-openrouter';
+    process.env['OPENAI_API_KEY'] = 'sk-gateway-openai';
+    const config = makeConfig({
+      authProfileRef: null,
+      keyRef: null,
+      allowGatewayFallback: true
+    });
+
+    const resolver = new AuthResolverImpl();
+    const result = await resolver.resolve(config);
+
+    expect(result).not.toBeNull();
+    expect(result!.apiKey).toBe('sk-gateway-openrouter');
+    expect(result!.provider).toBe('openrouter');
+  });
+
   it('gateway fallback skipped when not allowed', async () => {
     process.env['ANTHROPIC_API_KEY'] = 'sk-gateway-should-skip';
     const config = makeConfig({

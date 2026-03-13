@@ -36,6 +36,10 @@ export function getDefaultConfig(): SkillEvolutionConfig {
       mode: 'disabled',
       provider: 'anthropic',
       baseUrlOverride: null,
+      chatCompletionsPathOverride: null,
+      messagesPathOverride: null,
+      openrouterSiteUrl: null,
+      openrouterAppName: null,
       authProfileRef: null,
       keyRef: null,
       allowExecSecretRef: false,
@@ -141,12 +145,27 @@ export function validateConfig(config: SkillEvolutionConfig): void {
   if (!validLlmModes.includes(config.llm.mode)) {
     throw new InvalidConfigError(`skillEvolution.llm.mode must be one of: ${validLlmModes.join(', ')}.`);
   }
-  const validProviders = ['anthropic', 'openai-compatible', 'custom'];
+  const validProviders = ['anthropic', 'openai-compatible', 'openrouter', 'custom'];
   if (!validProviders.includes(config.llm.provider)) {
     throw new InvalidConfigError(`skillEvolution.llm.provider must be one of: ${validProviders.join(', ')}.`);
   }
   if (config.llm.baseUrlOverride !== null && typeof config.llm.baseUrlOverride !== 'string') {
     throw new InvalidConfigError('skillEvolution.llm.baseUrlOverride must be string or null.');
+  }
+  if (config.llm.chatCompletionsPathOverride !== null && typeof config.llm.chatCompletionsPathOverride !== 'string') {
+    throw new InvalidConfigError('skillEvolution.llm.chatCompletionsPathOverride must be string or null.');
+  }
+  if (config.llm.messagesPathOverride !== null && typeof config.llm.messagesPathOverride !== 'string') {
+    throw new InvalidConfigError('skillEvolution.llm.messagesPathOverride must be string or null.');
+  }
+  if (config.llm.openrouterSiteUrl !== null && typeof config.llm.openrouterSiteUrl !== 'string') {
+    throw new InvalidConfigError('skillEvolution.llm.openrouterSiteUrl must be string or null.');
+  }
+  if (config.llm.openrouterAppName !== null && typeof config.llm.openrouterAppName !== 'string') {
+    throw new InvalidConfigError('skillEvolution.llm.openrouterAppName must be string or null.');
+  }
+  if (config.llm.provider === 'custom' && !config.llm.baseUrlOverride) {
+    throw new InvalidConfigError('skillEvolution.llm.provider=custom requires llm.baseUrlOverride to be set.');
   }
   if (config.llm.authProfileRef !== null && typeof config.llm.authProfileRef !== 'string') {
     throw new InvalidConfigError('skillEvolution.llm.authProfileRef must be string or null.');

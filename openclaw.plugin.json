@@ -97,12 +97,32 @@
           },
           "provider": {
             "type": "string",
-            "enum": ["anthropic", "openai-compatible", "custom"],
+            "enum": ["anthropic", "openai-compatible", "openrouter", "custom"],
             "default": "anthropic"
           },
           "baseUrlOverride": {
             "type": ["string", "null"],
             "default": null
+          },
+          "chatCompletionsPathOverride": {
+            "type": ["string", "null"],
+            "default": null,
+            "description": "Override the chat completions endpoint path (e.g. /v1/chat/completions). When null, uses the provider default."
+          },
+          "messagesPathOverride": {
+            "type": ["string", "null"],
+            "default": null,
+            "description": "Override the Anthropic messages endpoint path (e.g. /v1/messages). When null, uses the provider default."
+          },
+          "openrouterSiteUrl": {
+            "type": ["string", "null"],
+            "default": null,
+            "description": "Site URL sent as HTTP-Referer header for OpenRouter requests."
+          },
+          "openrouterAppName": {
+            "type": ["string", "null"],
+            "default": null,
+            "description": "App name sent as X-Title header for OpenRouter requests."
           },
           "authProfileRef": {
             "type": ["string", "null"],

@@ -43,3 +43,30 @@ skillEvolution:
 #     requireHumanMerge: true
 #   queue:
 #     pollIntervalMs: 30000
+
+# ─────────────────────────────────────────────────────────────────
+# Example 3: OpenRouter provider
+#
+# Uses OpenRouter to access any supported model. The plugin
+# handles URL construction correctly (no double /v1 issue).
+#
+# Uncomment the block below and comment out Example 1 to use.
+# ─────────────────────────────────────────────────────────────────
+# skillEvolution:
+#   enabled: true
+#   review:
+#     engine: llm
+#     minEvidenceCount: 2
+#   llm:
+#     mode: explicit
+#     provider: openrouter
+#     modelOverride: anthropic/claude-sonnet-4-20250514
+#     openrouterSiteUrl: https://myapp.example.com
+#     openrouterAppName: My Skill Evolution
+#     keyRef:
+#       source: env
+#       id: OPENROUTER_API_KEY
+#   merge:
+#     requireHumanMerge: true
+#   queue:
+#     pollIntervalMs: 30000
